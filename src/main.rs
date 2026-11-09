@@ -1,9 +1,11 @@
 #[allow(dead_code)]
 mod color;
 mod engine;
+mod error;
 mod font;
 mod image;
 mod rectangle;
+mod scale;
 mod stream;
 mod text;
 mod viewport;
@@ -12,10 +14,14 @@ use std::collections::BTreeMap;
 
 use anywho::anywho;
 
-use engine::Engine;
+pub use engine::Engine;
+pub use error::Error;
 pub use image::Image;
 pub use rectangle::Rectangle;
+pub use scale::Scale;
 pub use viewport::Viewport;
+
+pub type Result<T> = std::result::Result<T, Error>;
 
 fn main() -> anywho::Result<()> {
     let mut args = std::env::args();
@@ -34,8 +40,6 @@ fn main() -> anywho::Result<()> {
     let engine = Engine::load(script)?;
 
     let mut show_help = false;
-    let mut width = None;
-    let mut height = None;
     let mut scale = 1.0;
     let mut values = BTreeMap::new();
 
@@ -43,40 +47,6 @@ fn main() -> anywho::Result<()> {
         match arg.as_str() {
             "--help" => {
                 show_help = true;
-            }
-            "--width" => {
-                let value = args
-                    .next()
-                    .ok_or_else(|| anywho!("--width requires a value"))?;
-
-                let value: u32 = value
-                    .parse()
-                    .map_err(|_| anywho!("invalid --width value: {value}"))?;
-
-                if !(1..=u16::MAX as u32).contains(&value) {
-                    return Err(anywho!(
-                        "invalid --width value: {value} (must be between 1 and 65535)"
-                    ));
-                }
-
-                width = Some(value);
-            }
-            "--height" => {
-                let value = args
-                    .next()
-                    .ok_or_else(|| anywho!("--height requires a value"))?;
-
-                let value: u32 = value
-                    .parse()
-                    .map_err(|_| anywho!("invalid --height value: {value}"))?;
-
-                if !(1..=u16::MAX as u32).contains(&value) {
-                    return Err(anywho!(
-                        "invalid --height value: {value} (must be between 1 and 65535)"
-                    ));
-                }
-
-                height = Some(value);
             }
             "--scale" => {
                 let value = args
@@ -133,11 +103,8 @@ fn main() -> anywho::Result<()> {
         })
         .collect();
 
-    let width = width.ok_or_else(|| anywho!("--width is required (see --help)"))?;
-    let height = height.ok_or_else(|| anywho!("--height is required (see --help)"))?;
-
     eprintln!(
-        "run: {} {width}×{height} ×{scale} {}",
+        "run: {} ×{scale} {}",
         engine.script().display(),
         arguments
             .iter()
@@ -149,7 +116,7 @@ fn main() -> anywho::Result<()> {
             .join(" ")
     );
 
-    engine.run(width, height, scale, &arguments)
+    engine.run(Scale::new(scale), &arguments)
 }
 
 fn help(engine: Option<&Engine>) -> String {

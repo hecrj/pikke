@@ -1,6 +1,6 @@
 use std::sync::{LazyLock, Mutex};
 
-use mlua::{Lua, Result, Table, UserData, UserDataFields, UserDataMethods, Value};
+use mlua::{Lua, Table, UserData, UserDataFields, UserDataMethods, Value};
 use parlance::NormalizedCoord as ParlayCoord;
 use parley::{
     Alignment, AlignmentOptions, FontData, FontFamily, FontWeight, Layout, LayoutContext,
@@ -10,18 +10,16 @@ use skrifa::outline::{OutlineGlyphCollection, OutlinePen};
 use skrifa::prelude::{FontRef, GlyphId, LocationRef, NormalizedCoord, Size};
 
 use crate::font::Font;
-use crate::{Rectangle, Viewport};
+use crate::{Rectangle, Result, Scale, Viewport};
 
 static LAYOUTS: LazyLock<Mutex<LayoutContext<()>>> =
     LazyLock::new(|| Mutex::new(LayoutContext::new()));
 
 #[derive(Clone, Debug)]
 pub struct Text {
-    pub x: i32,
-    pub y: i32,
-    pub width: u32,
-    pub height: u32,
-    pub scale: f32,
+    pub x: f32,
+    pub y: f32,
+    pub viewport: Viewport,
     pub ink_min: (f32, f32),
     layout: Layout<()>,
 }
@@ -37,32 +35,30 @@ pub struct Glyph<'a> {
 
 impl Text {
     pub fn new(
+        scale: Scale,
         family: &str,
         size: f32,
         weight: f32,
         x: f32,
         y: f32,
-        scale: f32,
         string: &str,
-    ) -> Self {
-        let anchor = ((x * scale).round() as i32, (y * scale).round() as i32);
+    ) -> Result<Self> {
         let degenerate = |layout: Layout<()>| Text {
-            x: anchor.0,
-            y: anchor.1,
-            width: 0,
-            height: 0,
-            scale,
+            x,
+            y,
+            viewport: Viewport::zero(scale),
             ink_min: (0.0, 0.0),
             layout,
         };
+
         if string.is_empty() {
-            return degenerate(Layout::new());
+            return Ok(degenerate(Layout::new()));
         }
 
         let layout = {
             let mut fonts = crate::font::FONTS.lock().unwrap();
             let mut layouts = LAYOUTS.lock().unwrap();
-            let mut builder = layouts.ranged_builder(&mut fonts, string, scale, true);
+            let mut builder = layouts.ranged_builder(&mut fonts, string, scale.into(), true);
             builder.push_default(StyleProperty::FontFamily(FontFamily::named(family)));
             builder.push_default(StyleProperty::FontSize(size));
             builder.push_default(StyleProperty::FontWeight(FontWeight::new(weight)));
@@ -73,22 +69,28 @@ impl Text {
         };
 
         let Some((min_x, min_y, max_x, max_y)) = ink(&layout) else {
-            return degenerate(layout);
+            return Ok(degenerate(layout));
         };
 
-        Self {
-            x: anchor.0,
-            y: anchor.1,
-            width: (max_x - min_x).round().max(0.0) as u32,
-            height: (max_y - min_y).round().max(0.0) as u32,
-            scale,
-            ink_min: (min_x, min_y),
+        let width = (max_x - min_x) / scale;
+        let height = (max_y - min_y) / scale;
+
+        Ok(Self {
+            x,
+            y,
+            viewport: Viewport::from_logical(width, height, scale)?,
+            ink_min: (min_x / scale, min_y / scale),
             layout,
-        }
+        })
     }
 
     pub fn runs(&self) -> impl Iterator<Item = Run<'_>> {
         runs_of(&self.layout)
+    }
+
+    pub fn translate(&mut self, dx: f32, dy: f32) {
+        self.x += dx;
+        self.y += dy;
     }
 }
 
@@ -222,59 +224,66 @@ impl OutlinePen for BboxPen {
 impl UserData for Text {
     fn add_fields<F: UserDataFields<Text>>(fields: &mut F) {
         fields.add_meta_field("__name", "Text");
+        fields.add_field_method_get("width", |_lua, this| -> mlua::Result<f32> {
+            Ok(this.viewport.logical_width())
+        });
+        fields.add_field_method_get("height", |_lua, this| -> mlua::Result<f32> {
+            Ok(this.viewport.logical_height())
+        });
+        fields.add_field_method_get("bounds", |_lua, this| -> mlua::Result<Rectangle> {
+            Ok(Rectangle::new(
+                this.x,
+                this.y,
+                this.viewport.logical_width(),
+                this.viewport.logical_height(),
+            ))
+        });
     }
 
     fn add_methods<M: UserDataMethods<Text>>(methods: &mut M) {
-        methods.add_method("width", |_lua, this, _args: ()| -> Result<f64> {
-            Ok(this.width as f64 / this.scale as f64)
-        });
-        methods.add_method("height", |_lua, this, _args: ()| -> Result<f64> {
-            Ok(this.height as f64 / this.scale as f64)
-        });
-        methods.add_method("bounds", |_lua, this, _args: ()| -> Result<Rectangle> {
-            Ok(Rectangle::new(
-                this.x as f32 / this.scale,
-                this.y as f32 / this.scale,
-                this.width as f32 / this.scale,
-                this.height as f32 / this.scale,
-            ))
-        });
-        methods.add_method_mut("translate", |_lua, this, offset: Table| -> Result<()> {
-            let number = |name: &str, value: Option<Value>| -> Result<f32> {
-                match value {
-                    None => Ok(0.0),
-                    Some(Value::Number(value)) => Ok(value as f32),
-                    Some(Value::Integer(value)) => Ok(value as f32),
-                    Some(_) => Err(mlua::Error::RuntimeError(format!(
-                        "translate: '{name}' is not a number"
-                    ))),
+        methods.add_method_mut(
+            "translate",
+            |_lua, this, offset: Table| -> mlua::Result<()> {
+                let number = |name: &str, value: Option<Value>| -> mlua::Result<f32> {
+                    match value {
+                        None => Ok(0.0),
+                        Some(Value::Number(value)) => Ok(value as f32),
+                        Some(Value::Integer(value)) => Ok(value as f32),
+                        Some(_) => Err(mlua::Error::RuntimeError(format!(
+                            "translate: '{name}' is not a number"
+                        ))),
+                    }
+                };
+
+                let dx = number("x", offset.get("x")?)?;
+                let dy = number("y", offset.get("y")?)?;
+
+                if !dx.is_finite() {
+                    return Err(mlua::Error::RuntimeError(
+                        "translate: 'x' must be finite".to_owned(),
+                    ));
                 }
-            };
-            let dx = number("x", offset.get("x")?)?;
-            let dy = number("y", offset.get("y")?)?;
-            if !dx.is_finite() {
-                return Err(mlua::Error::RuntimeError(
-                    "translate: 'x' must be finite".to_owned(),
-                ));
-            }
-            if !dy.is_finite() {
-                return Err(mlua::Error::RuntimeError(
-                    "translate: 'y' must be finite".to_owned(),
-                ));
-            }
-            this.x += (dx * this.scale).round() as i32;
-            this.y += (dy * this.scale).round() as i32;
-            Ok(())
-        });
+
+                if !dy.is_finite() {
+                    return Err(mlua::Error::RuntimeError(
+                        "translate: 'y' must be finite".to_owned(),
+                    ));
+                }
+
+                this.translate(dx, dy);
+
+                Ok(())
+            },
+        );
     }
 }
 
-pub fn install(lua: &Lua, env: &Table, viewport: Viewport) -> anywho::Result<()> {
+pub fn install(lua: &Lua, env: &Table, scale: Scale) -> anywho::Result<()> {
     env.set(
         "text",
         lua.create_function(
-            move |_lua, (string, opts): (String, Table)| -> Result<Text> {
-                let number = |name: &str, value: Option<Value>| -> Result<Option<f32>> {
+            move |_lua, (string, opts): (String, Table)| -> mlua::Result<Text> {
+                let number = |name: &str, value: Option<Value>| -> mlua::Result<Option<f32>> {
                     match value {
                         None => Ok(None),
                         Some(Value::Number(value)) => Ok(Some(value as f32)),
@@ -309,26 +318,20 @@ pub fn install(lua: &Lua, env: &Table, viewport: Viewport) -> anywho::Result<()>
                 let weight = number("weight", opts.get("weight")?)?.unwrap_or(400.0);
                 let x = number("x", opts.get("x")?)?.unwrap_or(0.0);
                 let y = number("y", opts.get("y")?)?.unwrap_or(0.0);
+
                 if !x.is_finite() {
                     return Err(mlua::Error::RuntimeError(
                         "text: 'x' must be finite".to_owned(),
                     ));
                 }
+
                 if !y.is_finite() {
                     return Err(mlua::Error::RuntimeError(
                         "text: 'y' must be finite".to_owned(),
                     ));
                 }
 
-                Ok(Text::new(
-                    &font.family,
-                    size,
-                    weight,
-                    x,
-                    y,
-                    viewport.scale,
-                    &string,
-                ))
+                Ok(Text::new(scale, &font.family, size, weight, x, y, &string)?)
             },
         )?,
     )?;
@@ -344,23 +347,14 @@ mod tests {
 
     use super::{Text, install};
     use crate::font::{Font, install as font_install};
-    use crate::{Rectangle, Viewport};
+    use crate::{Rectangle, Scale, Viewport};
 
     fn installed() -> (Lua, Table, Function, Function) {
         let lua = Lua::new();
         let env = lua.create_table().unwrap();
         let script_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fonts");
         font_install(&lua, &env, &script_dir).unwrap();
-        install(
-            &lua,
-            &env,
-            Viewport {
-                width: 100,
-                height: 100,
-                scale: 1.0,
-            },
-        )
-        .unwrap();
+        install(&lua, &env, Scale::default()).unwrap();
         let font: Function = env.get("font").unwrap();
         let text: Function = env.get("text").unwrap();
         (lua, env, font, text)
@@ -382,17 +376,13 @@ mod tests {
         opts.set("x", 7.0).unwrap();
         opts.set("y", 3.0).unwrap();
         let text = text_of(&text, "Noto", opts);
-        assert_eq!((text.x, text.y), (7, 3));
-        assert!(text.width > 0);
-        assert!(text.height > 0);
+        assert_eq!((text.x, text.y), (7.0, 3.0));
+        assert!(text.viewport.logical_width() > 0.0);
+        assert!(text.viewport.logical_height() > 0.0);
 
         let env = lua.create_table().unwrap();
         env.set("text", lua.create_userdata(text).unwrap()).unwrap();
-        let bounds: AnyUserData = lua
-            .load("text:bounds()")
-            .set_environment(env)
-            .eval()
-            .unwrap();
+        let bounds: AnyUserData = lua.load("text.bounds").set_environment(env).eval().unwrap();
         let bounds = *bounds.borrow::<Rectangle>().unwrap();
         assert_eq!((bounds.x, bounds.y), (7.0, 3.0));
         assert!(bounds.width > 0.0);
@@ -410,7 +400,15 @@ mod tests {
         opts.set("font", font).unwrap();
         opts.set("size", 100.0).unwrap();
         let text = text_of(&text, "Noto", opts);
-        assert_eq!((text.x, text.y, text.width, text.height), (0, 0, 0, 0));
+        assert_eq!(
+            (
+                text.x,
+                text.y,
+                text.viewport.logical_width(),
+                text.viewport.logical_height()
+            ),
+            (0.0, 0.0, 0.0, 0.0)
+        );
     }
 
     #[test]
@@ -422,7 +420,15 @@ mod tests {
         opts.set("font", font).unwrap();
         opts.set("size", 100.0).unwrap();
         let text = text_of(&text, "", opts);
-        assert_eq!((text.x, text.y, text.width, text.height), (0, 0, 0, 0));
+        assert_eq!(
+            (
+                text.x,
+                text.y,
+                text.viewport.logical_width(),
+                text.viewport.logical_height()
+            ),
+            (0.0, 0.0, 0.0, 0.0)
+        );
     }
 
     #[test]
@@ -434,29 +440,23 @@ mod tests {
         opts.set("font", font).unwrap();
         opts.set("size", 100.0).unwrap();
         let text = text_of(&text, "Noto", opts);
-        assert_eq!((text.x, text.y), (0, 0));
-        assert!(text.width > 0);
+        assert_eq!((text.x, text.y), (0.0, 0.0));
+        assert!(text.viewport.logical_width() > 0.0);
     }
 
     #[test]
     fn the_bounds_reports_logical_px() {
         let lua = Lua::new();
         let text = Text {
-            x: 10,
-            y: 20,
-            width: 100,
-            height: 50,
-            scale: 0.5,
+            x: 20.0,
+            y: 40.0,
+            viewport: Viewport::from_logical(200.0, 100.0, Scale::new(0.5)).unwrap(),
             ink_min: (0.0, 0.0),
             layout: Layout::new(),
         };
         let env = lua.create_table().unwrap();
         env.set("text", lua.create_userdata(text).unwrap()).unwrap();
-        let bounds: AnyUserData = lua
-            .load("text:bounds()")
-            .set_environment(env)
-            .eval()
-            .unwrap();
+        let bounds: AnyUserData = lua.load("text.bounds").set_environment(env).eval().unwrap();
         let bounds = *bounds.borrow::<Rectangle>().unwrap();
         assert_eq!(
             (bounds.x, bounds.y, bounds.width, bounds.height),
@@ -512,14 +512,12 @@ mod tests {
         assert!(eval(opts).contains("text: 'y' must be finite"));
     }
 
-    fn text_value(x: i32, y: i32, scale: f32) -> (Lua, Table, AnyUserData) {
+    fn text_value(x: f32, y: f32, scale: f32) -> (Lua, Table, AnyUserData) {
         let lua = Lua::new();
         let text = Text {
             x,
             y,
-            width: 100,
-            height: 50,
-            scale,
+            viewport: Viewport::from_physical_u32(100, 50, Scale::new(scale)).unwrap(),
             ink_min: (0.0, 0.0),
             layout: Layout::new(),
         };
@@ -531,23 +529,19 @@ mod tests {
 
     #[test]
     fn the_width_and_height_report_logical_px() {
-        let (lua, env, _text) = text_value(10, 20, 0.5);
+        let (lua, env, _text) = text_value(10.0, 20.0, 0.5);
         let width: f64 = lua
-            .load("text:width()")
+            .load("text.width")
             .set_environment(env.clone())
             .eval()
             .unwrap();
-        let height: f64 = lua
-            .load("text:height()")
-            .set_environment(env)
-            .eval()
-            .unwrap();
+        let height: f64 = lua.load("text.height").set_environment(env).eval().unwrap();
         assert_eq!((width, height), (200.0, 100.0));
     }
 
     #[test]
     fn the_translate_moves_the_anchor() {
-        let (lua, env, text) = text_value(10, 20, 1.0);
+        let (lua, env, text) = text_value(10.0, 20.0, 1.0);
 
         let offset = lua.create_table().unwrap();
         offset.set("x", 5.0).unwrap();
@@ -558,7 +552,7 @@ mod tests {
             .eval::<()>()
             .unwrap();
         let moved = text.borrow::<Text>().unwrap().clone();
-        assert_eq!((moved.x, moved.y), (15, -10));
+        assert_eq!((moved.x, moved.y), (15.0, -10.0));
 
         let empty = lua.create_table().unwrap();
         env.set("offset", empty).unwrap();
@@ -567,22 +561,22 @@ mod tests {
             .eval::<()>()
             .unwrap();
         let moved = text.borrow::<Text>().unwrap().clone();
-        assert_eq!((moved.x, moved.y), (15, -10));
+        assert_eq!((moved.x, moved.y), (15.0, -10.0));
 
         let offset = lua.create_table().unwrap();
-        offset.set("x", 7).unwrap();
+        offset.set("x", 7.0).unwrap();
         env.set("offset", offset).unwrap();
         lua.load("text:translate(offset)")
             .set_environment(env)
             .eval::<()>()
             .unwrap();
         let moved = text.borrow::<Text>().unwrap().clone();
-        assert_eq!((moved.x, moved.y), (22, -10));
+        assert_eq!((moved.x, moved.y), (22.0, -10.0));
     }
 
     #[test]
-    fn the_translate_rounds_at_the_run_scale() {
-        let (lua, env, text) = text_value(20, 40, 2.0);
+    fn the_translate_adds_logical_offsets() {
+        let (lua, env, text) = text_value(20.0, 40.0, 2.0);
         let offset = lua.create_table().unwrap();
         offset.set("x", 1.5).unwrap();
         offset.set("y", -2.5).unwrap();
@@ -592,12 +586,12 @@ mod tests {
             .eval::<()>()
             .unwrap();
         let moved = text.borrow::<Text>().unwrap().clone();
-        assert_eq!((moved.x, moved.y), (23, 35));
+        assert_eq!((moved.x, moved.y), (21.5, 37.5));
     }
 
     #[test]
     fn the_translate_is_reflected_in_bounds() {
-        let (lua, env, text) = text_value(10, 20, 1.0);
+        let (lua, env, text) = text_value(10.0, 20.0, 1.0);
         let offset = lua.create_table().unwrap();
         offset.set("y", -5.0).unwrap();
         env.set("offset", offset).unwrap();
@@ -605,20 +599,16 @@ mod tests {
             .set_environment(env.clone())
             .eval::<()>()
             .unwrap();
-        let bounds: AnyUserData = lua
-            .load("text:bounds()")
-            .set_environment(env)
-            .eval()
-            .unwrap();
+        let bounds: AnyUserData = lua.load("text.bounds").set_environment(env).eval().unwrap();
         let bounds = *bounds.borrow::<Rectangle>().unwrap();
         assert_eq!((bounds.x, bounds.y), (10.0, 15.0));
         let moved = text.borrow::<Text>().unwrap().clone();
-        assert_eq!(moved.y, 15);
+        assert_eq!(moved.y, 15.0);
     }
 
     #[test]
     fn the_translate_validates_its_arguments() {
-        let (lua, env, _text) = text_value(10, 20, 1.0);
+        let (lua, env, _text) = text_value(10.0, 20.0, 1.0);
 
         let offset = lua.create_table().unwrap();
         offset.set("x", "left").unwrap();

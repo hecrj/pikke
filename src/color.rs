@@ -128,10 +128,10 @@ pub enum Space {
 pub fn resize(
     filter: Filter,
     src: &[f32],
-    src_w: u32,
-    src_h: u32,
-    dst_w: u32,
-    dst_h: u32,
+    src_w: u16,
+    src_h: u16,
+    dst_w: u16,
+    dst_h: u16,
 ) -> Vec<f32> {
     match filter {
         Filter::Lanczos => resample(lanczos3, 3.0, src, src_w, src_h, dst_w, dst_h),
@@ -143,10 +143,10 @@ fn resample(
     kernel: impl Fn(f64) -> f64,
     support: f64,
     src: &[f32],
-    src_w: u32,
-    src_h: u32,
-    dst_w: u32,
-    dst_h: u32,
+    src_w: u16,
+    src_h: u16,
+    dst_w: u16,
+    dst_h: u16,
 ) -> Vec<f32> {
     fn pass(
         src: &[f32],
@@ -224,7 +224,7 @@ fn resample(
     out
 }
 
-fn resample_cubic(src: &[f32], src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> Vec<f32> {
+fn resample_cubic(src: &[f32], src_w: u16, src_h: u16, dst_w: u16, dst_h: u16) -> Vec<f32> {
     let (sw, sh, dw, dh) = (
         src_w as usize,
         src_h as usize,
@@ -303,7 +303,7 @@ fn cubic(x: f64) -> f64 {
     }
 }
 
-pub fn crop(src: &[f32], src_w: u32, left: u32, top: u32, out_w: u32, out_h: u32) -> Vec<f32> {
+pub fn crop(src: &[f32], src_w: u16, left: u16, top: u16, out_w: u16, out_h: u16) -> Vec<f32> {
     let (sw, ow, oh) = (src_w as usize, out_w as usize, out_h as usize);
     let (left, top) = (left as usize, top as usize);
     let mut out = vec![0.0f32; ow * oh];

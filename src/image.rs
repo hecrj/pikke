@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use anywho::anywho;
 use image::{ColorType, ImageFormat};
-use mlua::{AnyUserData, Lua, Result, Table, UserData, UserDataFields, UserDataMethods};
+use mlua::{AnyUserData, Lua, Table, UserData, UserDataFields, UserDataMethods};
 use skrifa::outline::{OutlineGlyphCollection, OutlinePen};
 use skrifa::prelude::{FontRef, GlyphId, LocationRef, NormalizedCoord, Size};
 use vello_cpu::kurbo::{Affine, BezPath, Rect};
@@ -14,15 +14,13 @@ use vello_cpu::{
 
 use crate::color::{Color, Filter, Space, crop, luma_linear, resize};
 use crate::text::Text;
-use crate::{Rectangle, Viewport};
+use crate::{Rectangle, Result, Scale, Viewport};
 
 #[derive(Clone, Debug)]
 pub struct Image {
     buffer: Arc<Buffer>,
-    width: u32,
-    height: u32,
-    scale: f32,
     viewport: Viewport,
+    target_scale: Scale,
 }
 
 #[derive(Clone, Debug)]
@@ -41,41 +39,41 @@ pub enum Mode {
 }
 
 impl Image {
-    pub fn transparent(width: u32, height: u32, viewport: Viewport) -> Image {
+    pub fn transparent(width: f32, height: f32, scale: Scale) -> Result<Self> {
         let count = (width * height) as usize;
-        Image {
+
+        Ok(Self {
             buffer: Arc::new(Buffer {
                 r: vec![0.0; count],
                 g: vec![0.0; count],
                 b: vec![0.0; count],
                 a: vec![0.0; count],
             }),
-            width,
-            height,
-            scale: viewport.scale,
-            viewport,
-        }
+            viewport: Viewport::from_logical(width, height, scale)?,
+            target_scale: scale,
+        })
     }
 
-    pub fn physical_width(&self) -> u32 {
-        self.width
+    pub fn width(&self) -> u16 {
+        self.viewport.width()
     }
 
-    pub fn physical_height(&self) -> u32 {
-        self.height
+    pub fn height(&self) -> u16 {
+        self.viewport.height()
     }
 
-    pub fn logical_width(&self) -> u32 {
-        (self.width as f32 / self.scale).round() as u32
+    pub fn logical_width(&self) -> f32 {
+        self.viewport.logical_width()
     }
 
-    pub fn logical_height(&self) -> u32 {
-        (self.height as f32 / self.scale).round() as u32
+    pub fn logical_height(&self) -> f32 {
+        self.viewport.logical_height()
     }
 
     pub fn to_rgba8(&self) -> Vec<u8> {
-        let count = (self.width * self.height) as usize;
+        let count = self.viewport.total_pixels();
         let mut out = Vec::with_capacity(count * 4);
+
         for i in 0..count {
             let color = Color {
                 r: self.buffer.r[i],
@@ -88,52 +86,56 @@ impl Image {
             .to_rgba_u8();
             out.extend_from_slice(&color);
         }
+
         out
     }
 
-    pub fn resize(&mut self, new_width: f32, new_height: f32, filter: Filter, mode: Mode) {
-        let scale = self.viewport.scale;
-        let (target_w, target_h) = (
-            self.viewport.to_physical(new_width),
-            self.viewport.to_physical(new_height),
-        );
-        assert!(
-            target_w != 0 && target_h != 0,
-            "resize: the physical target is {target_w}×{target_h}; it must be at least 1×1"
-        );
+    pub fn resize(
+        &mut self,
+        new_width: f32,
+        new_height: f32,
+        filter: Filter,
+        mode: Mode,
+        scale: Option<Scale>,
+    ) -> Result<()> {
+        let new_viewport =
+            Viewport::from_logical(new_width, new_height, scale.unwrap_or(self.target_scale))?;
 
-        let (box_w, box_h) = match mode {
+        if self.width() == new_viewport.width() && self.height() == new_viewport.height() {
+            self.viewport = new_viewport;
+            return Ok(());
+        }
+
+        let box_viewport = match mode {
             Mode::Cover => {
                 let factor = f32::max(
-                    target_w as f32 / self.width as f32,
-                    target_h as f32 / self.height as f32,
+                    new_viewport.width() as f32 / self.width() as f32,
+                    new_viewport.height() as f32 / self.height() as f32,
                 );
-                (
-                    (self.width as f32 * factor).round() as u32,
-                    (self.height as f32 * factor).round() as u32,
-                )
+
+                Viewport::from_logical(self.logical_width(), self.logical_height(), factor)?
             }
-            Mode::Stretch => (target_w, target_h),
+            Mode::Stretch => new_viewport,
         };
 
-        let left = (box_w - target_w) / 2;
-        let top = (box_h - target_h) / 2;
-
-        if (box_w, box_h) == (self.width, self.height) && left == 0 && top == 0 {
-            self.scale = scale;
-            return;
-        }
-
+        let left = (box_viewport.width() - new_viewport.width()) / 2;
+        let top = (box_viewport.height() - new_viewport.height()) / 2;
+        let (box_w, box_h) = (box_viewport.width(), box_viewport.height());
+        let resized = box_w != self.width() || box_h != self.height();
         let buffer = Arc::make_mut(&mut self.buffer);
-        let resized = (box_w, box_h) != (self.width, self.height);
+
         if resized {
-            let (w, h) = (self.width, self.height);
-            buffer.r = resize(filter, &buffer.r, w, h, box_w, box_h);
-            buffer.g = resize(filter, &buffer.g, w, h, box_w, box_h);
-            buffer.b = resize(filter, &buffer.b, w, h, box_w, box_h);
-            buffer.a = resize(filter, &buffer.a, w, h, box_w, box_h);
+            let (width, height) = (self.viewport.width(), self.viewport.height());
+
+            buffer.r = resize(filter, &buffer.r, width, height, box_w, box_h);
+            buffer.g = resize(filter, &buffer.g, width, height, box_w, box_h);
+            buffer.b = resize(filter, &buffer.b, width, height, box_w, box_h);
+            buffer.a = resize(filter, &buffer.a, width, height, box_w, box_h);
         }
+
         if left != 0 || top != 0 {
+            let (target_w, target_h) = (new_viewport.width(), new_viewport.height());
+
             buffer.r = crop(&buffer.r, box_w, left, top, target_w, target_h);
             buffer.g = crop(&buffer.g, box_w, left, top, target_w, target_h);
             buffer.b = crop(&buffer.b, box_w, left, top, target_w, target_h);
@@ -146,15 +148,15 @@ impl Image {
             }
         }
 
-        self.width = target_w;
-        self.height = target_h;
-        self.scale = scale;
+        self.viewport = new_viewport;
+
+        Ok(())
     }
 
     pub fn autocontrast(&mut self) {
-        let count = (self.width * self.height) as usize;
-
+        let count = self.viewport.total_pixels();
         let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+
         for i in 0..count {
             let luma = luma_linear(self.buffer.r[i], self.buffer.g[i], self.buffer.b[i]);
             lo = lo.min(luma);
@@ -175,6 +177,7 @@ impl Image {
                 (value - lo) * scale
             }
         };
+
         for i in 0..count {
             buffer.r[i] = stretch(buffer.r[i]);
             buffer.g[i] = stretch(buffer.g[i]);
@@ -182,28 +185,34 @@ impl Image {
         }
     }
 
-    pub fn blend(&mut self, other: &Image, at: Rectangle, space: Space) {
-        let other = if other.scale != self.scale {
+    pub fn blend(&mut self, other: &Image, at: Rectangle, space: Space) -> Result<()> {
+        let scale = self.viewport.scale();
+
+        let other = if other.viewport.scale() != scale {
             let mut other = other.clone();
+
             other.resize(
-                other.logical_width() as f32,
-                other.logical_height() as f32,
+                other.logical_width(),
+                other.logical_height(),
                 Filter::default(),
                 Mode::Stretch,
-            );
+                Some(scale),
+            )?;
+
             other
         } else {
             other.clone()
         };
 
-        let at_x = self.viewport.to_physical_signed(at.x);
-        let at_y = self.viewport.to_physical_signed(at.y);
+        let at_x = scale.to_physical_signed(at.x)?;
+        let at_y = scale.to_physical_signed(at.y)?;
         let left = at_x.max(0);
         let top = at_y.max(0);
-        let right = (at_x + other.width as i32).min(self.width as i32);
-        let bottom = (at_y + other.height as i32).min(self.height as i32);
+        let right = (at_x + other.width() as i32).min(self.width() as i32);
+        let bottom = (at_y + other.height() as i32).min(self.height() as i32);
+
         if left >= right || top >= bottom {
-            return;
+            return Ok(());
         }
 
         let buffer = Arc::make_mut(&mut self.buffer);
@@ -218,20 +227,23 @@ impl Image {
 
         for y in top..bottom {
             for x in left..right {
-                let i = (y * self.width as i32 + x) as usize;
-                let j = ((y - at_y) * other.width as i32 + (x - at_x)) as usize;
+                let i = (y * self.viewport.width() as i32 + x) as usize;
+                let j = ((y - at_y) * other.viewport.width() as i32 + (x - at_x)) as usize;
+
                 let base = Color {
                     r: base_r[i],
                     g: base_g[i],
                     b: base_b[i],
                     a: base_a[i],
                 };
+
                 let layer = Color {
                     r: layer_r[j],
                     g: layer_g[j],
                     b: layer_b[j],
                     a: layer_a[j],
                 };
+
                 let blended = match space {
                     Space::Linear => base.over(layer),
                     Space::Srgb => base
@@ -239,12 +251,15 @@ impl Image {
                         .over(layer.linear_to_srgb())
                         .srgb_to_linear(),
                 };
+
                 base_r[i] = blended.r;
                 base_g[i] = blended.g;
                 base_b[i] = blended.b;
                 base_a[i] = blended.a;
             }
         }
+
+        Ok(())
     }
 
     pub fn fill(&mut self, region: Rectangle, paint: Color) {
@@ -252,18 +267,18 @@ impl Image {
         let top = region.y;
         let right = region.x + region.width;
         let bottom = region.y + region.height;
+
         if region.width <= 0.0 || region.height <= 0.0 {
             return;
         }
+
         if !left.is_finite() || !top.is_finite() || !right.is_finite() || !bottom.is_finite() {
             return;
         }
 
-        let width = self.width as u16;
-        let height = self.height as u16;
         let mut resources = Resources::new();
-        let mut context = RenderContext::new(width, height);
-        context.set_transform(Affine::scale(self.scale.into()));
+        let mut context = RenderContext::new(self.width(), self.height());
+        context.set_transform(Affine::scale(self.viewport.scale().into()));
         context.set_paint(AlphaColor::<Srgb>::BLACK);
         context.fill_rect(&Rect::new(
             left.into(),
@@ -271,12 +286,14 @@ impl Image {
             right.into(),
             bottom.into(),
         ));
-        let mut pixmap = Pixmap::new(width, height);
+
+        let mut pixmap = Pixmap::new(self.width(), self.height());
         context.render(&mut pixmap, &mut resources);
 
         let buffer = Arc::make_mut(&mut self.buffer);
         let (base_r, base_g, base_b, base_a) =
             (&mut buffer.r, &mut buffer.g, &mut buffer.b, &mut buffer.a);
+
         for (i, pixel) in pixmap.data().iter().enumerate() {
             let cover = pixel.a as f32 / 255.0;
             if cover > 0.0 {
@@ -301,22 +318,32 @@ impl Image {
         }
     }
 
-    pub fn fill_text(&mut self, text: &Text, paint: Color) {
-        let (box_x, box_y) = (text.x, text.y);
-        let (box_width, box_height) = (text.width, text.height);
+    pub fn fill_text(&mut self, text: &Text, paint: Color) -> Result<()> {
+        let (box_width, box_height) = (text.viewport.width(), text.viewport.height());
+
         if box_width == 0 || box_height == 0 {
-            return;
+            return Ok(());
         }
+
+        let scale = text.viewport.scale();
+        let (box_x, box_y) = (
+            scale.to_physical_signed(text.x)?,
+            scale.to_physical_signed(text.y)?,
+        );
+        let (ink_x, ink_y) = (
+            scale.to_physical_signed(text.ink_min.0)?,
+            scale.to_physical_signed(text.ink_min.1)?,
+        );
 
         let (scratch_width, scratch_height) = (box_width + 2, box_height + 2);
         let (origin_x, origin_y) = (box_x - 1, box_y - 1);
-        let (layout_x, layout_y) = (box_x as f32 - text.ink_min.0, box_y as f32 - text.ink_min.1);
+        let (layout_x, layout_y) = (box_x - ink_x, box_y - ink_y);
 
         let mut resources = Resources::new();
-        let mut context = RenderContext::new(scratch_width as u16, scratch_height as u16);
+        let mut context = RenderContext::new(scratch_width, scratch_height);
         context.set_transform(Affine::translate((
-            (layout_x - origin_x as f32) as f64,
-            (layout_y - origin_y as f32) as f64,
+            (layout_x - origin_x) as f64,
+            (layout_y - origin_y) as f64,
         )));
         context.set_paint(AlphaColor::<Srgb>::BLACK);
 
@@ -327,15 +354,18 @@ impl Image {
                 else {
                     continue;
                 };
+
                 let collection = OutlineGlyphCollection::new(&font);
                 let Some(glyph_outline) = collection.get(GlyphId::new(glyph.id)) else {
                     continue;
                 };
+
                 let coords: Vec<NormalizedCoord> = glyph
                     .location
                     .iter()
                     .map(|coord| NormalizedCoord::from_bits(coord.to_bits()))
                     .collect();
+
                 let location = LocationRef::new(&coords);
                 let mut pen = PathPen::new();
                 let Ok(_) = glyph_outline.draw((Size::new(glyph.size), location), &mut pen) else {
@@ -354,12 +384,13 @@ impl Image {
             }
         }
 
-        let mut pixmap = Pixmap::new(scratch_width as u16, scratch_height as u16);
+        let mut pixmap = Pixmap::new(scratch_width, scratch_height);
         context.render(&mut pixmap, &mut resources);
 
         let buffer = Arc::make_mut(&mut self.buffer);
         let (base_r, base_g, base_b, base_a) =
             (&mut buffer.r, &mut buffer.g, &mut buffer.b, &mut buffer.a);
+
         for (y, row) in pixmap
             .data()
             .chunks_exact(scratch_width as usize)
@@ -367,78 +398,94 @@ impl Image {
         {
             for (x, pixel) in row.iter().enumerate() {
                 let cover = pixel.a as f32 / 255.0;
+
                 if cover <= 0.0 {
                     continue;
                 }
+
                 let canvas_x = origin_x + x as i32;
                 let canvas_y = origin_y + y as i32;
                 let inside_box = (box_x..box_x + box_width as i32).contains(&canvas_x)
                     && (box_y..box_y + box_height as i32).contains(&canvas_y);
+
                 let inside_canvas = canvas_x >= 0
-                    && canvas_x < self.width as i32
+                    && canvas_x < self.viewport.width() as i32
                     && canvas_y >= 0
-                    && canvas_y < self.height as i32;
+                    && canvas_y < self.viewport.height() as i32;
+
                 if !inside_box || !inside_canvas {
                     continue;
                 }
-                let i = (canvas_y * self.width as i32 + canvas_x) as usize;
+
+                let i = (canvas_y * self.viewport.width() as i32 + canvas_x) as usize;
                 let base = Color {
                     r: base_r[i],
                     g: base_g[i],
                     b: base_b[i],
                     a: base_a[i],
                 };
+
                 let layer = Color {
                     r: paint.r * cover,
                     g: paint.g * cover,
                     b: paint.b * cover,
                     a: cover,
                 };
+
                 let blended = base
                     .linear_to_srgb()
                     .over(layer.linear_to_srgb())
                     .srgb_to_linear();
+
                 base_r[i] = blended.r;
                 base_g[i] = blended.g;
                 base_b[i] = blended.b;
                 base_a[i] = blended.a;
             }
         }
+
+        Ok(())
     }
 
-    pub fn luma_at(&self, region: Rectangle) -> f32 {
-        let left = self.viewport.to_physical_signed(region.x);
-        let top = self.viewport.to_physical_signed(region.y);
-        let right = self.viewport.to_physical_signed(region.x + region.width);
-        let bottom = self.viewport.to_physical_signed(region.y + region.height);
-        let left = left.max(0).min(self.width as i32);
-        let top = top.max(0).min(self.height as i32);
-        let right = right.max(0).min(self.width as i32);
-        let bottom = bottom.max(0).min(self.height as i32);
+    pub fn luma_in(&self, region: Rectangle) -> Result<f32> {
+        let scale = self.viewport.scale();
+        let left = scale.to_physical_signed(region.x)?;
+        let top = scale.to_physical_signed(region.y)?;
+        let right = scale.to_physical_signed(region.x + region.width)?;
+        let bottom = scale.to_physical_signed(region.y + region.height)?;
+
+        let left = left.max(0).min(self.width() as i32);
+        let top = top.max(0).min(self.height() as i32);
+        let right = right.max(0).min(self.width() as i32);
+        let bottom = bottom.max(0).min(self.height() as i32);
+
         if left >= right || top >= bottom {
-            return 0.0;
+            return Ok(0.0);
         }
 
         let (r, g, b) = (&self.buffer.r, &self.buffer.g, &self.buffer.b);
         let mut luma = 0.0f32;
+
         for y in top..bottom {
             for x in left..right {
-                let i = (y * self.width as i32 + x) as usize;
+                let i = (y * self.width() as i32 + x) as usize;
                 luma += luma_linear(r[i], g[i], b[i]);
             }
         }
-        luma / ((right - left) * (bottom - top)) as f32 * 255.0
+
+        Ok(luma / ((right - left) * (bottom - top)) as f32 * 255.0)
     }
 
     pub fn write(&self) -> anywho::Result<()> {
         let rgba8 = self.to_rgba8();
         let target = Path::new("output.png");
         let temp = Path::new("output.png.tmp");
+
         image::save_buffer_with_format(
             temp,
             &rgba8,
-            self.width,
-            self.height,
+            u32::from(self.width()),
+            u32::from(self.height()),
             ColorType::Rgba8,
             ImageFormat::Png,
         )
@@ -446,24 +493,29 @@ impl Image {
             let _ = std::fs::remove_file(temp);
             anywho!("failed to write output.png: {error}")
         })?;
+
         std::fs::rename(temp, target)
             .map_err(|error| anywho!("failed to finalize output.png: {error}"))?;
+
         Ok(())
     }
 }
 
-fn load(path: &Path, viewport: Viewport) -> anywho::Result<Image> {
+fn load(path: &Path, target_scale: Scale) -> anywho::Result<Image> {
     let rgba = image::open(path)
         .map_err(|error| anywho!("failed to load {}: {error}", path.display()))?
         .to_rgba8();
+
     let (width, height) = (rgba.width(), rgba.height());
     let count = (width * height) as usize;
+
     let (mut r, mut g, mut b, mut a) = (
         Vec::with_capacity(count),
         Vec::with_capacity(count),
         Vec::with_capacity(count),
         Vec::with_capacity(count),
     );
+
     for pixel in rgba.as_chunks::<4>().0 {
         let color = Color::from_rgba_u8([pixel[0], pixel[1], pixel[2], pixel[3]])
             .srgb_to_linear()
@@ -473,12 +525,11 @@ fn load(path: &Path, viewport: Viewport) -> anywho::Result<Image> {
         b.push(color.b);
         a.push(color.a);
     }
+
     Ok(Image {
         buffer: Arc::new(Buffer { r, g, b, a }),
-        width,
-        height,
-        scale: 1.0,
-        viewport,
+        viewport: Viewport::from_physical_u32(width, height, Scale::default())?,
+        target_scale,
     })
 }
 
@@ -529,41 +580,49 @@ impl OutlinePen for PathPen {
     }
 }
 
-fn paint_from_hex(color: &str) -> Result<Color> {
+fn paint_from_hex(color: &str) -> mlua::Result<Color> {
     let message = || format!("fill: {color} is not a #RRGGBB hex color");
     let digits = color
         .strip_prefix('#')
         .filter(|digits| digits.len() == 6)
         .ok_or_else(|| mlua::Error::RuntimeError(message()))?;
-    let channel = |start: usize| -> Result<u8> {
+
+    let channel = |start: usize| -> mlua::Result<u8> {
         u8::from_str_radix(&digits[start..start + 2], 16)
             .map_err(|_| mlua::Error::RuntimeError(message()))
     };
+
     Ok(Color::from_rgba_u8([channel(0)?, channel(2)?, channel(4)?, 255]).srgb_to_linear())
 }
 
 impl UserData for Image {
     fn add_fields<F: UserDataFields<Image>>(fields: &mut F) {
         fields.add_meta_field("__name", "Image");
-    }
-
-    fn add_methods<M: UserDataMethods<Image>>(methods: &mut M) {
-        methods.add_method("width", |_lua, this, _args: ()| -> Result<u32> {
+        fields.add_field_method_get("width", |_lua, this| -> mlua::Result<f32> {
             Ok(this.logical_width())
         });
-        methods.add_method("height", |_lua, this, _args: ()| -> Result<u32> {
+        fields.add_field_method_get("height", |_lua, this| -> mlua::Result<f32> {
             Ok(this.logical_height())
         });
-        methods.add_method("size", |lua, this, _args: ()| -> Result<Table> {
+        fields.add_field_method_get("physical_width", |_lua, this| -> mlua::Result<u16> {
+            Ok(this.viewport.width())
+        });
+        fields.add_field_method_get("physical_height", |_lua, this| -> mlua::Result<u16> {
+            Ok(this.viewport.height())
+        });
+        fields.add_field_method_get("size", |lua, this| -> mlua::Result<Table> {
             let size = lua.create_table()?;
             size.set(1, this.logical_width())?;
             size.set(2, this.logical_height())?;
             Ok(size)
         });
-        methods.add_method("clone", |_lua, this, _args: ()| -> Result<Image> {
+    }
+
+    fn add_methods<M: UserDataMethods<Image>>(methods: &mut M) {
+        methods.add_method("clone", |_lua, this, _args: ()| -> mlua::Result<Image> {
             Ok(this.clone())
         });
-        methods.add_method_mut("resize", |_lua, this, opts: Table| -> Result<()> {
+        methods.add_method_mut("resize", |_lua, this, opts: Table| -> mlua::Result<()> {
             let width: Option<f32> = opts.get("width")?;
             let height: Option<f32> = opts.get("height")?;
             let filter: Option<String> = opts.get("filter")?;
@@ -571,12 +630,11 @@ impl UserData for Image {
 
             let (width, height) = match (width, height) {
                 (Some(width), Some(height)) => (width, height),
-                (Some(width), None) => (
-                    width,
-                    (width * this.height as f32 / this.width as f32).round(),
-                ),
+                (Some(width), None) => {
+                    (width, width * this.logical_height() / this.logical_width())
+                }
                 (None, Some(height)) => (
-                    (height * this.width as f32 / this.height as f32).round(),
+                    height * this.logical_width() / this.logical_height(),
                     height,
                 ),
                 (None, None) => {
@@ -607,29 +665,23 @@ impl UserData for Image {
                 }
             };
 
-            this.resize(width, height, filter, mode);
-            Ok(())
-        });
-        methods.add_method_mut("autocontrast", |_lua, this, _args: ()| -> Result<()> {
-            this.autocontrast();
+            this.resize(width, height, filter, mode, None)?;
             Ok(())
         });
         methods.add_method_mut(
+            "autocontrast",
+            |_lua, this, _args: ()| -> mlua::Result<()> {
+                this.autocontrast();
+                Ok(())
+            },
+        );
+        methods.add_method_mut(
             "blend",
-            |lua, this, (other, opts): (AnyUserData, Option<Table>)| -> Result<()> {
+            |lua, this, (other, opts): (AnyUserData, Option<Table>)| -> mlua::Result<()> {
                 let opts = match opts {
                     Some(opts) => opts,
                     None => lua.create_table()?,
                 };
-
-                let (width, height) = (this.physical_width(), this.physical_height());
-                let (physical_width, physical_height) =
-                    (this.viewport.physical_width(), this.viewport.physical_height());
-                if (width, height) != (physical_width, physical_height) {
-                    return Err(mlua::Error::RuntimeError(format!(
-                        "blend: the receiver is {width}×{height}, the viewport is {physical_width}×{physical_height}"
-                    )));
-                }
 
                 let other = other.borrow::<Image>()?;
                 let at: Option<AnyUserData> = opts.get("at")?;
@@ -644,17 +696,17 @@ impl UserData for Image {
                     Some(other) => {
                         return Err(mlua::Error::RuntimeError(format!(
                             "blend: unknown color_space: {other}"
-                        )))
+                        )));
                     }
                 };
 
-                this.blend(&other, at, space);
+                this.blend(&other, at, space)?;
                 Ok(())
             },
         );
         methods.add_method_mut(
             "fill",
-            |_lua, this, (region, color): (AnyUserData, String)| -> Result<()> {
+            |_lua, this, (region, color): (AnyUserData, String)| -> mlua::Result<()> {
                 let paint = paint_from_hex(&color)?;
                 match region.borrow::<Rectangle>() {
                     Ok(region) => {
@@ -667,33 +719,28 @@ impl UserData for Image {
                                 "fill: the region must be a `Rectangle` or a `Text`".to_owned(),
                             )
                         })?;
-                        this.fill_text(&text, paint);
+                        this.fill_text(&text, paint)?;
                         Ok(())
                     }
                 }
             },
         );
         methods.add_method(
-            "luma_at",
-            |_lua, this, region: AnyUserData| -> Result<f64> {
+            "luma_in",
+            |_lua, this, region: AnyUserData| -> mlua::Result<f32> {
                 let region: Rectangle = *region.borrow::<Rectangle>()?;
-                Ok(this.luma_at(region) as f64)
+                Ok(this.luma_in(region)?)
             },
         );
     }
 }
 
-pub fn install(
-    lua: &Lua,
-    env: &Table,
-    script_dir: &Path,
-    viewport: Viewport,
-) -> anywho::Result<()> {
+pub fn install(lua: &Lua, env: &Table, script_dir: &Path, scale: Scale) -> anywho::Result<()> {
     let script_dir = script_dir.to_path_buf();
     env.set(
         "image",
-        lua.create_function(move |_lua, path: String| -> Result<Image> {
-            load(&script_dir.join(&path), viewport)
+        lua.create_function(move |_lua, path: String| -> mlua::Result<Image> {
+            load(&script_dir.join(&path), scale)
                 .map_err(|error| mlua::Error::RuntimeError(error.to_string()))
         })?,
     )?;
@@ -710,7 +757,7 @@ mod tests {
     use super::{Buffer, Filter, Image, Mode, load};
     use crate::color::{Color, Space, luma_linear};
     use crate::text::Text;
-    use crate::{Rectangle, Viewport};
+    use crate::{Rectangle, Result, Scale, Viewport};
 
     #[test]
     fn the_base_background_loads_at_its_file_dims() {
@@ -720,16 +767,10 @@ mod tests {
         let file_width = u32::from_be_bytes([file[16], file[17], file[18], file[19]]);
         let file_height = u32::from_be_bytes([file[20], file[21], file[22], file[23]]);
 
-        let viewport = Viewport {
-            width: 512,
-            height: 512,
-            scale: 1.0,
-        };
-
-        let image = load(&path, viewport).unwrap();
+        let image = load(&path, Scale::default()).unwrap();
         assert_eq!(
             (image.logical_width(), image.logical_height()),
-            (file_width, file_height)
+            (file_width as f32, file_height as f32)
         );
 
         let count = (file_width * file_height) as usize;
@@ -745,58 +786,54 @@ mod tests {
     }
 
     #[test]
-    fn resize_lands_on_its_targets_and_forks() {
+    fn resize_lands_on_its_targets_and_forks() -> Result<()> {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("images/Lenna.png");
-        let mut image = load(
-            &path,
-            Viewport {
-                width: 512,
-                height: 512,
-                scale: 0.5,
-            },
-        )
-        .unwrap();
+        let mut image = load(&path, Scale::new(0.5)).unwrap();
         let first_pixel = image.buffer.r[0];
 
         let mut fork = image.clone();
 
-        image.resize(200.0, 250.0, Filter::Lanczos, Mode::Stretch);
-        assert_eq!(
-            (image.physical_width(), image.physical_height()),
-            (100, 125)
-        );
+        image.resize(
+            200.0,
+            250.0,
+            Filter::Lanczos,
+            Mode::Stretch,
+            Some(Scale::new(0.5)),
+        )?;
+        assert_eq!((image.width(), image.height()), (100, 125));
 
-        assert_eq!((fork.physical_width(), fork.physical_height()), (512, 512));
+        assert_eq!((fork.width(), fork.height()), (512, 512));
         assert_eq!(fork.buffer.r[0], first_pixel);
 
-        fork.resize(400.0, 100.0, Filter::Cubic, Mode::Cover);
-        assert_eq!((fork.physical_width(), fork.physical_height()), (200, 50));
+        fork.resize(
+            400.0,
+            100.0,
+            Filter::Cubic,
+            Mode::Cover,
+            Some(Scale::new(0.5)),
+        )?;
+        assert_eq!((fork.width(), fork.height()), (200, 50));
 
-        let mut image = load(
-            &path,
-            Viewport {
-                width: 512,
-                height: 512,
-                scale: 2.0,
-            },
-        )
-        .unwrap();
-        image.resize(256.0, 256.0, Filter::Cubic, Mode::Stretch);
-        assert_eq!(image.scale, 2.0);
-        assert_eq!((image.logical_width(), image.logical_height()), (256, 256));
+        let mut image = load(&path, Scale::new(2.0)).unwrap();
+        image.resize(
+            256.0,
+            256.0,
+            Filter::Cubic,
+            Mode::Stretch,
+            Some(Scale::new(2.0)),
+        )?;
+        assert_eq!(image.viewport.scale(), Scale::new(2.0));
         assert_eq!(
-            (image.physical_width(), image.physical_height()),
-            (512, 512)
+            (image.logical_width(), image.logical_height()),
+            (256.0, 256.0)
         );
+        assert_eq!((image.width(), image.height()), (512, 512));
+
+        Ok(())
     }
 
     #[test]
-    fn the_resize_keeps_a_constant_plane_constant() {
-        let viewport = Viewport {
-            width: 8,
-            height: 8,
-            scale: 1.0,
-        };
+    fn the_resize_keeps_a_constant_plane_constant() -> Result<()> {
         let expected = Color {
             r: 0.5,
             g: 0.5,
@@ -809,22 +846,19 @@ mod tests {
 
         for filter in [Filter::Cubic, Filter::Lanczos] {
             for target in [4.0, 16.0] {
-                let mut image = square([0.5, 0.5, 0.5, 1.0], 8, viewport);
-                image.resize(target, target, filter, Mode::Stretch);
+                let mut image = square([0.5, 0.5, 0.5, 1.0], 8, Scale::default())?;
+                image.resize(target, target, filter, Mode::Stretch, None)?;
                 for pixel in image.to_rgba8().chunks(4) {
                     assert_eq!(pixel, &expected);
                 }
             }
         }
+
+        Ok(())
     }
 
     #[test]
-    fn the_luma_at_is_the_709_mean_of_the_stored_channels() {
-        let viewport = Viewport {
-            width: 4,
-            height: 4,
-            scale: 1.0,
-        };
+    fn the_luma_in_is_the_709_mean_of_the_stored_channels() -> Result<()> {
         let r: [f32; 16] = [
             0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 0.0, 0.1, 0.2, 0.3, 0.4, 0.5,
         ];
@@ -835,10 +869,8 @@ mod tests {
                 b: vec![0.6; 16],
                 a: vec![1.0; 16],
             }),
-            width: 4,
-            height: 4,
-            scale: 1.0,
-            viewport,
+            viewport: Viewport::from_physical_u32(4, 4, Scale::default())?,
+            target_scale: Scale::default(),
         };
 
         let luma = |r: f32| 0.2126 * r as f64 + 0.7152 * 0.5 + 0.0722 * 0.6;
@@ -848,58 +880,49 @@ mod tests {
 
         let full: Vec<usize> = (0..16).collect();
         assert!(
-            (image.luma_at(Rectangle::new(0.0, 0.0, 4.0, 4.0)) as f64 - mean(&full)).abs() < 1e-2
+            (image.luma_in(Rectangle::new(0.0, 0.0, 4.0, 4.0))? as f64 - mean(&full)).abs() < 1e-2
         );
 
         let top_left = vec![0, 1, 4, 5];
         assert!(
-            (image.luma_at(Rectangle::new(0.0, 0.0, 2.0, 2.0)) as f64 - mean(&top_left)).abs()
+            (image.luma_in(Rectangle::new(0.0, 0.0, 2.0, 2.0))? as f64 - mean(&top_left)).abs()
                 < 1e-2
         );
 
         let right = vec![3, 7, 11, 15];
         assert!(
-            (image.luma_at(Rectangle::new(3.0, 0.0, 1.0, 4.0)) as f64 - mean(&right)).abs() < 1e-2
+            (image.luma_in(Rectangle::new(3.0, 0.0, 1.0, 4.0))? as f64 - mean(&right)).abs() < 1e-2
         );
 
         let clipped = vec![0];
         assert!(
-            (image.luma_at(Rectangle::new(-1.0, -1.0, 2.0, 2.0)) as f64 - mean(&clipped)).abs()
+            (image.luma_in(Rectangle::new(-1.0, -1.0, 2.0, 2.0))? as f64 - mean(&clipped)).abs()
                 < 1e-2
         );
 
-        assert_eq!(image.luma_at(Rectangle::new(10.0, 10.0, 2.0, 2.0)), 0.0);
-        assert_eq!(image.luma_at(Rectangle::new(0.0, 0.0, -2.0, 2.0)), 0.0);
+        assert_eq!(image.luma_in(Rectangle::new(10.0, 10.0, 2.0, 2.0))?, 0.0);
+        assert_eq!(image.luma_in(Rectangle::new(0.0, 0.0, -2.0, 2.0))?, 0.0);
+
+        Ok(())
     }
 
     #[test]
-    fn the_luma_at_reads_regions_in_logical_px() {
-        let viewport = Viewport {
-            width: 8,
-            height: 8,
-            scale: 0.5,
-        };
-        let image = square([0.5, 0.5, 0.5, 1.0], 4, viewport);
+    fn the_luma_in_reads_regions_in_logical_px() -> Result<()> {
+        let image = square([0.5, 0.5, 0.5, 1.0], 4, Scale::new(0.5))?;
 
-        assert!((image.luma_at(Rectangle::new(0.0, 0.0, 8.0, 8.0)) - 127.5).abs() < 1e-2);
-        assert!((image.luma_at(Rectangle::new(0.0, 0.0, 4.0, 4.0)) - 127.5).abs() < 1e-2);
-        assert_eq!(image.luma_at(Rectangle::new(8.0, 8.0, 4.0, 4.0)), 0.0);
+        assert!((image.luma_in(Rectangle::new(0.0, 0.0, 8.0, 8.0))? - 127.5).abs() < 1e-2);
+        assert!((image.luma_in(Rectangle::new(0.0, 0.0, 4.0, 4.0))? - 127.5).abs() < 1e-2);
+        assert_eq!(image.luma_in(Rectangle::new(8.0, 8.0, 4.0, 4.0))?, 0.0);
+
+        Ok(())
     }
 
     #[test]
-    fn the_luma_at_matches_the_709_mean_on_a_real_image() {
+    fn the_luma_in_matches_the_709_mean_on_a_real_image() -> Result<()> {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("images/Lenna.png");
-        let image = load(
-            &path,
-            Viewport {
-                width: 512,
-                height: 512,
-                scale: 1.0,
-            },
-        )
-        .unwrap();
+        let image = load(&path, Scale::default()).unwrap();
 
-        let luma = image.luma_at(Rectangle::new(10.0, 20.0, 100.0, 50.0));
+        let luma = image.luma_in(Rectangle::new(10.0, 20.0, 100.0, 50.0))?;
 
         let (r, g, b) = (&image.buffer.r, &image.buffer.g, &image.buffer.b);
         let sum: f32 = (20..70)
@@ -908,65 +931,57 @@ mod tests {
             .sum();
         let expected = sum / 5000.0 * 255.0;
         assert!((luma - expected).abs() < 1e-2);
+
+        Ok(())
     }
 
     #[test]
-    fn the_luma_at_matches_the_independent_709_mean() {
+    fn the_luma_in_matches_the_independent_709_mean() -> Result<()> {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("personal/images/sky-night.png");
-        let image = load(
-            &path,
-            Viewport {
-                width: 1640,
-                height: 2048,
-                scale: 1.0,
-            },
-        )
-        .unwrap();
+        let image = load(&path, Scale::default()).unwrap();
 
         // Frozen oracles: an independent Python pass (PIL, the IEC 61966-2-1
         // decode, the Rec. 709 mean) over personal/images/sky-night.png.
-        let corner = image.luma_at(Rectangle::new(10.0, 20.0, 300.0, 200.0));
+        let corner = image.luma_in(Rectangle::new(10.0, 20.0, 300.0, 200.0))?;
         assert!((corner - 2.7941046).abs() < 1e-2);
 
-        let full = image.luma_at(Rectangle::new(0.0, 0.0, 1640.0, 2048.0));
+        let full = image.luma_in(Rectangle::new(0.0, 0.0, 1640.0, 2048.0))?;
         assert!((full - 11.452538).abs() < 1e-2);
+
+        Ok(())
     }
 
-    fn synthetic_linear(pixels: &[[f32; 4]], viewport: Viewport) -> Image {
+    fn synthetic_linear(pixels: &[[f32; 4]], scale: Scale) -> Result<Image> {
         let plane = |channel: usize| pixels.iter().map(|pixel| pixel[channel]).collect();
 
-        Image {
+        Ok(Image {
             buffer: Arc::new(Buffer {
                 r: plane(0),
                 g: plane(1),
                 b: plane(2),
                 a: plane(3),
             }),
-            width: pixels.len() as u32,
-            height: 1,
-            scale: 1.0,
-            viewport,
-        }
+            viewport: Viewport::from_physical_u32(pixels.len() as u32, 1, scale)?,
+            target_scale: scale,
+        })
     }
 
-    fn square(color: [f32; 4], size: u32, viewport: Viewport) -> Image {
+    fn square(color: [f32; 4], size: u32, scale: Scale) -> Result<Image> {
         let count = (size * size) as usize;
-        Image {
+        Ok(Image {
             buffer: Arc::new(Buffer {
                 r: vec![color[0]; count],
                 g: vec![color[1]; count],
                 b: vec![color[2]; count],
                 a: vec![color[3]; count],
             }),
-            width: size,
-            height: size,
-            scale: 1.0,
-            viewport,
-        }
+            viewport: Viewport::from_physical_u32(size, size, scale)?,
+            target_scale: scale,
+        })
     }
 
     #[test]
-    fn the_autocontrast_is_full_range_and_tone_preserving() {
+    fn the_autocontrast_is_full_range_and_tone_preserving() -> Result<()> {
         let pixels = [
             [0.3, 0.3, 0.3, 1.0],
             [0.5, 0.5, 0.5, 1.0],
@@ -974,14 +989,7 @@ mod tests {
             [1.0, 0.12, 0.12, 1.0],
         ];
 
-        let mut image = synthetic_linear(
-            &pixels,
-            Viewport {
-                width: 4,
-                height: 1,
-                scale: 1.0,
-            },
-        );
+        let mut image = synthetic_linear(&pixels, Scale::default())?;
         image.autocontrast();
 
         let lo = luma_linear(0.3, 0.3, 0.3);
@@ -1009,20 +1017,15 @@ mod tests {
         assert_eq!(image.buffer.g[3], 0.12);
         assert_eq!(image.buffer.b[3], 0.12);
         assert_eq!(image.buffer.a[3], 1.0);
+
+        Ok(())
     }
 
     #[test]
-    fn the_uniform_autocontrast_is_the_identity() {
+    fn the_uniform_autocontrast_is_the_identity() -> Result<()> {
         let pixels = [[0.4, 0.3, 0.5, 1.0]; 3];
 
-        let mut image = synthetic_linear(
-            &pixels,
-            Viewport {
-                width: 3,
-                height: 1,
-                scale: 1.0,
-            },
-        );
+        let mut image = synthetic_linear(&pixels, Scale::default())?;
         image.autocontrast();
 
         for i in 0..3 {
@@ -1030,22 +1033,16 @@ mod tests {
             assert_eq!(image.buffer.g[i], 0.3);
             assert_eq!(image.buffer.b[i], 0.5);
         }
+
+        Ok(())
     }
 
     #[test]
     fn the_sky_background_autocontrast_applies_the_ramp() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("personal/images/sky-night.png");
-        let mut image = load(
-            &path,
-            Viewport {
-                width: 1640,
-                height: 2048,
-                scale: 1.0,
-            },
-        )
-        .unwrap();
+        let mut image = load(&path, Scale::default()).unwrap();
 
-        let count = (image.width * image.height) as usize;
+        let count = image.viewport.total_pixels();
         let (r, g, b) = (
             image.buffer.r.clone(),
             image.buffer.g.clone(),
@@ -1081,51 +1078,43 @@ mod tests {
     }
 
     #[test]
-    fn the_blend_is_byte_identical_where_the_layer_is_opaque() {
+    fn the_blend_is_byte_identical_where_the_layer_is_opaque() -> Result<()> {
         let lenna = Path::new(env!("CARGO_MANIFEST_DIR")).join("images/Lenna.png");
         let sky = Path::new(env!("CARGO_MANIFEST_DIR")).join("personal/images/sky-night.png");
-        let viewport = Viewport {
-            width: 512,
-            height: 512,
-            scale: 1.0,
-        };
-        let mut base = load(&sky, viewport).unwrap();
+        let mut base = load(&sky, Scale::default()).unwrap();
         let before = base.to_rgba8();
-        let layer = load(&lenna, viewport).unwrap();
-        let (base_width, base_height) = (base.physical_width(), base.physical_height());
-        let (layer_width, layer_height) = (layer.physical_width(), layer.physical_height());
+        let layer = load(&lenna, Scale::default()).unwrap();
+        let (base_width, base_height) = (base.width() as usize, base.height() as usize);
+        let (layer_width, layer_height) = (layer.width() as usize, layer.height() as usize);
 
-        base.blend(&layer, Rectangle::default(), Space::Linear);
+        base.blend(&layer, Rectangle::default(), Space::Linear)?;
 
         let after = base.to_rgba8();
         let layer = layer.to_rgba8();
         for y in 0..base_height {
             for x in 0..base_width {
-                let pixel = (y * base_width + x) as usize * 4;
+                let pixel = (y * base_width + x) * 4;
                 if x < layer_width && y < layer_height {
-                    let overlapped = (y * layer_width + x) as usize * 4;
+                    let overlapped = (y * layer_width + x) * 4;
                     assert_eq!(&after[pixel..pixel + 4], &layer[overlapped..overlapped + 4]);
                 } else {
                     assert_eq!(&after[pixel..pixel + 4], &before[pixel..pixel + 4]);
                 }
             }
         }
+
+        Ok(())
     }
 
     #[test]
-    fn the_blend_matches_the_pinned_over_on_real_data() {
+    fn the_blend_matches_the_pinned_over_on_real_data() -> Result<()> {
         let lenna = Path::new(env!("CARGO_MANIFEST_DIR")).join("images/Lenna.png");
         let mask =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("personal/images/Card_Mask_Standard.png");
-        let viewport = Viewport {
-            width: 512,
-            height: 512,
-            scale: 1.0,
-        };
-        let mut base = load(&lenna, viewport).unwrap();
-        let layer = load(&mask, viewport).unwrap();
-        let base_width = base.physical_width();
-        let layer_width = layer.physical_width();
+        let mut base = load(&lenna, Scale::default()).unwrap();
+        let layer = load(&mask, Scale::default()).unwrap();
+        let (base_width, base_height) = (base.width() as usize, base.height() as usize);
+        let layer_width = layer.width() as usize;
 
         let (base_r, base_g, base_b, base_a) = (
             base.buffer.r.clone(),
@@ -1134,13 +1123,13 @@ mod tests {
             base.buffer.a.clone(),
         );
 
-        base.blend(&layer, Rectangle::default(), Space::Linear);
+        base.blend(&layer, Rectangle::default(), Space::Linear)?;
 
         let actual = base.to_rgba8();
-        for y in 0..base.height {
-            for x in 0..base.width {
-                let i = (y * base_width + x) as usize;
-                let j = (y * layer_width + x) as usize;
+        for y in 0..base_height {
+            for x in 0..base_width {
+                let i = y * base_width + x;
+                let j = y * layer_width + x;
                 let expected = Color {
                     r: base_r[i],
                     g: base_g[i],
@@ -1159,20 +1148,17 @@ mod tests {
                 assert_eq!(&actual[i * 4..i * 4 + 4], &expected[..]);
             }
         }
+
+        Ok(())
     }
 
     #[test]
-    fn the_blend_offset_and_clip_are_exact() {
-        let viewport = Viewport {
-            width: 4,
-            height: 4,
-            scale: 1.0,
-        };
-        let black = square([0.0, 0.0, 0.0, 1.0], 4, viewport);
-        let white = square([1.0, 1.0, 1.0, 1.0], 2, viewport);
+    fn the_blend_offset_and_clip_are_exact() -> Result<()> {
+        let black = square([0.0, 0.0, 0.0, 1.0], 4, Scale::default())?;
+        let white = square([1.0, 1.0, 1.0, 1.0], 2, Scale::default())?;
 
         let mut base = black.clone();
-        base.blend(&white, Rectangle::new(-1.0, -1.0, 0.0, 0.0), Space::Linear);
+        base.blend(&white, Rectangle::new(-1.0, -1.0, 0.0, 0.0), Space::Linear)?;
         let rgba = base.to_rgba8();
         assert_eq!(&rgba[0..4], &[255, 255, 255, 255]);
         for i in 1..16 {
@@ -1180,28 +1166,25 @@ mod tests {
         }
 
         let mut base = black.clone();
-        base.blend(&white, Rectangle::new(3.0, 3.0, 0.0, 0.0), Space::Linear);
+        base.blend(&white, Rectangle::new(3.0, 3.0, 0.0, 0.0), Space::Linear)?;
         let rgba = base.to_rgba8();
         for i in 0..15 {
             assert_eq!(&rgba[i * 4..i * 4 + 4], &[0, 0, 0, 255]);
         }
         assert_eq!(&rgba[60..64], &[255, 255, 255, 255]);
+
+        Ok(())
     }
 
     #[test]
-    fn the_blend_color_spaces_diverge() {
-        let viewport = Viewport {
-            width: 2,
-            height: 1,
-            scale: 1.0,
-        };
-        let base = synthetic_linear(&[[0.5, 0.5, 0.5, 1.0]; 2], viewport);
-        let layer = synthetic_linear(&[[0.5, 0.5, 0.5, 0.5]; 2], viewport);
+    fn the_blend_color_spaces_diverge() -> Result<()> {
+        let base = synthetic_linear(&[[0.5, 0.5, 0.5, 1.0]; 2], Scale::default())?;
+        let layer = synthetic_linear(&[[0.5, 0.5, 0.5, 0.5]; 2], Scale::default())?;
 
         let mut linear = base.clone();
-        linear.blend(&layer, Rectangle::default(), Space::Linear);
+        linear.blend(&layer, Rectangle::default(), Space::Linear)?;
         let mut srgb = base.clone();
-        srgb.blend(&layer, Rectangle::default(), Space::Srgb);
+        srgb.blend(&layer, Rectangle::default(), Space::Srgb)?;
 
         for i in 0..2 {
             let linear_expected = Color {
@@ -1237,34 +1220,34 @@ mod tests {
             assert!((srgb.buffer.r[i] - srgb_expected.r).abs() <= 1e-6);
             assert!((linear_expected.r - srgb_expected.r).abs() > 0.01);
         }
+
+        Ok(())
     }
 
     #[test]
-    fn the_blend_resamples_the_file_scale_layer() {
+    fn the_blend_resamples_the_file_scale_layer() -> Result<()> {
         let lenna = Path::new(env!("CARGO_MANIFEST_DIR")).join("images/Lenna.png");
-        let viewport = Viewport {
-            width: 256,
-            height: 256,
-            scale: 0.5,
-        };
-        let mut base = Image::transparent(256, 256, viewport);
-        let layer = load(&lenna, viewport).unwrap();
+        let mut base = Image::transparent(512.0, 512.0, Scale::new(0.5))?;
+        let layer = load(&lenna, Scale::new(0.5)).unwrap();
 
-        base.blend(&layer, Rectangle::default(), Space::Linear);
+        base.blend(&layer, Rectangle::default(), Space::Linear)?;
 
         let mut expected = layer.clone();
-        expected.resize(512.0, 512.0, Filter::default(), Mode::Stretch);
+        expected.resize(
+            512.0,
+            512.0,
+            Filter::default(),
+            Mode::Stretch,
+            Some(Scale::new(0.5)),
+        )?;
         assert_eq!(base.to_rgba8(), expected.to_rgba8());
+
+        Ok(())
     }
 
     #[test]
-    fn the_fill_paints_an_aligned_region_exactly() {
-        let viewport = Viewport {
-            width: 8,
-            height: 8,
-            scale: 1.0,
-        };
-        let mut image = Image::transparent(8, 8, viewport);
+    fn the_fill_paints_an_aligned_region_exactly() -> Result<()> {
+        let mut image = Image::transparent(8.0, 8.0, Scale::default())?;
         let paint = Color::from_rgba_u8([128, 160, 192, 255]).srgb_to_linear();
 
         image.fill(Rectangle::new(1.0, 2.0, 4.0, 3.0), paint);
@@ -1282,16 +1265,13 @@ mod tests {
                 assert_eq!(&painted[pixel..pixel + 4], &expected);
             }
         }
+
+        Ok(())
     }
 
     #[test]
-    fn the_fill_antialiases_fractional_edges() {
-        let viewport = Viewport {
-            width: 4,
-            height: 4,
-            scale: 1.0,
-        };
-        let mut image = Image::transparent(4, 4, viewport);
+    fn the_fill_antialiases_fractional_edges() -> Result<()> {
+        let mut image = Image::transparent(4.0, 4.0, Scale::default())?;
         let paint = Color::from_rgba_u8([255, 0, 0, 255]).srgb_to_linear();
 
         image.fill(Rectangle::new(0.5, 0.5, 3.0, 3.0), paint);
@@ -1313,16 +1293,13 @@ mod tests {
             .to_rgba_u8();
             assert_eq!(&painted[i * 4..i * 4 + 4], &expected);
         }
+
+        Ok(())
     }
 
     #[test]
-    fn the_fill_antialiases_at_the_run_scale() {
-        let viewport = Viewport {
-            width: 8,
-            height: 8,
-            scale: 0.5,
-        };
-        let mut image = Image::transparent(8, 8, viewport);
+    fn the_fill_antialiases_at_the_run_scale() -> Result<()> {
+        let mut image = Image::transparent(16.0, 16.0, Scale::new(0.5))?;
         let paint = Color::from_rgba_u8([0, 255, 255, 255]).srgb_to_linear();
 
         image.fill(Rectangle::new(0.5, 0.5, 3.0, 3.0), paint);
@@ -1346,16 +1323,13 @@ mod tests {
             .to_rgba_u8();
             assert_eq!(&painted[i * 4..i * 4 + 4], &expected);
         }
+
+        Ok(())
     }
 
     #[test]
-    fn the_fill_is_a_no_op_for_degenerate_regions() {
-        let viewport = Viewport {
-            width: 4,
-            height: 4,
-            scale: 1.0,
-        };
-        let mut image = Image::transparent(4, 4, viewport);
+    fn the_fill_is_a_no_op_for_degenerate_regions() -> Result<()> {
+        let mut image = Image::transparent(4.0, 4.0, Scale::default())?;
         let paint = Color::from_rgba_u8([255, 255, 255, 255]).srgb_to_linear();
 
         image.fill(Rectangle::new(0.0, 0.0, 0.0, 0.0), paint);
@@ -1364,23 +1338,28 @@ mod tests {
 
         let painted = image.to_rgba8();
         assert!(painted.iter().all(|&byte| byte == 0));
+
+        Ok(())
     }
 
     #[test]
-    fn the_fill_binding_validates_its_arguments() {
+    fn the_fill_binding_validates_its_arguments() -> Result<()> {
         let lua = Lua::new();
-        let viewport = Viewport {
-            width: 4,
-            height: 4,
-            scale: 1.0,
-        };
-        let image = Image::transparent(4, 4, viewport);
+        let image = Image::transparent(4.0, 4.0, Scale::default())?;
         let output = lua.create_userdata(image).unwrap();
         let region = lua
             .create_userdata(Rectangle::new(0.0, 0.0, 2.0, 2.0))
             .unwrap();
         let text = lua
-            .create_userdata(Text::new("Any Family", 100.0, 400.0, 0.0, 0.0, 1.0, ""))
+            .create_userdata(Text::new(
+                Scale::default(),
+                "Any Family",
+                100.0,
+                400.0,
+                0.0,
+                0.0,
+                "",
+            )?)
             .unwrap();
 
         let env = lua.create_table().unwrap();
@@ -1420,6 +1399,8 @@ mod tests {
         let painted = output.borrow::<Image>().unwrap().clone();
         assert!(painted.buffer.r[5] > 0.0);
         assert_eq!(painted.buffer.a[5], 1.0);
+
+        Ok(())
     }
 
     fn register_vendored_font() {
@@ -1433,23 +1414,18 @@ mod tests {
     }
 
     #[test]
-    fn the_fill_text_paints_the_ink_in_the_pinned_srgb_space() {
+    fn the_fill_text_paints_the_ink_in_the_pinned_srgb_space() -> Result<()> {
         register_vendored_font();
-        let text = Text::new("Noto Sans", 100.0, 400.0, 10.0, 10.0, 1.0, "N");
-        assert!(text.width > 0 && text.height > 0);
+        let text = Text::new(Scale::default(), "Noto Sans", 100.0, 400.0, 10.0, 10.0, "N")?;
+        assert!(text.viewport.logical_width() > 0.0 && text.viewport.logical_height() > 0.0);
 
-        let viewport = Viewport {
-            width: 200,
-            height: 200,
-            scale: 1.0,
-        };
-        let mut image = Image::transparent(200, 200, viewport);
+        let mut image = Image::transparent(200.0, 200.0, Scale::default())?;
         let paint = Color::from_rgba_u8([200, 30, 60, 255]).srgb_to_linear();
-        image.fill_text(&text, paint);
+        image.fill_text(&text, paint)?;
 
         let painted = image.to_rgba8();
         let (box_x, box_y) = (text.x as u32, text.y as u32);
-        let (box_width, box_height) = (text.width, text.height);
+        let (box_width, box_height) = (text.viewport.width() as u32, text.viewport.height() as u32);
         let mut solid = 0;
         let mut partial = 0;
         for y in 0..200u32 {
@@ -1490,50 +1466,44 @@ mod tests {
         }
         assert!(solid > 20);
         assert!(partial > 0);
+
+        Ok(())
     }
 
     #[test]
-    fn the_fill_text_is_a_no_op_for_degenerate_text() {
-        let viewport = Viewport {
-            width: 4,
-            height: 4,
-            scale: 1.0,
-        };
-        let mut image = Image::transparent(4, 4, viewport);
+    fn the_fill_text_is_a_no_op_for_degenerate_text() -> Result<()> {
+        let mut image = Image::transparent(4.0, 4.0, Scale::default())?;
         let paint = Color::from_rgba_u8([255, 255, 255, 255]).srgb_to_linear();
 
-        let empty = Text::new("Noto Sans", 100.0, 400.0, 0.0, 0.0, 1.0, "");
-        image.fill_text(&empty, paint);
+        let empty = Text::new(Scale::default(), "Noto Sans", 100.0, 400.0, 0.0, 0.0, "")?;
+        image.fill_text(&empty, paint)?;
 
         register_vendored_font();
         let unregistered = Text::new(
+            Scale::default(),
             "An Unregistered Family",
             100.0,
             400.0,
             0.0,
             0.0,
-            1.0,
             "Noto",
-        );
-        image.fill_text(&unregistered, paint);
+        )?;
+        image.fill_text(&unregistered, paint)?;
 
         assert!(image.to_rgba8().iter().all(|&byte| byte == 0));
+
+        Ok(())
     }
 
     #[test]
-    fn the_fill_text_clips_at_the_canvas_corner() {
+    fn the_fill_text_clips_at_the_canvas_corner() -> Result<()> {
         register_vendored_font();
-        let text = Text::new("Noto Sans", 100.0, 400.0, -5.0, -5.0, 1.0, "N");
-        assert!(text.width > 0 && text.height > 0);
+        let text = Text::new(Scale::default(), "Noto Sans", 100.0, 400.0, -5.0, -5.0, "N")?;
+        assert!(text.viewport.logical_width() > 0.0 && text.viewport.logical_height() > 0.0);
 
-        let viewport = Viewport {
-            width: 200,
-            height: 200,
-            scale: 1.0,
-        };
-        let mut image = Image::transparent(200, 200, viewport);
+        let mut image = Image::transparent(200.0, 200.0, Scale::default())?;
         let paint = Color::from_rgba_u8([200, 30, 60, 255]).srgb_to_linear();
-        image.fill_text(&text, paint);
+        image.fill_text(&text, paint)?;
 
         let painted = image.to_rgba8();
         let mut solid = 0;
@@ -1561,5 +1531,7 @@ mod tests {
         let pixel = (2 * 200 + 2) as usize * 4;
         assert_eq!(&painted[pixel..pixel + 4], &[200, 30, 60, 255]);
         assert!(solid > 20);
+
+        Ok(())
     }
 }

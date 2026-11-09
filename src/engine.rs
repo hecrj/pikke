@@ -5,7 +5,7 @@ use std::rc::Rc;
 use anywho::anywho;
 use mlua::{AnyUserData, Function, Lua, Table};
 
-use crate::{Image, Viewport, font, image, rectangle, stream, text};
+use crate::{Image, Scale, font, image, rectangle, stream, text};
 
 pub struct Engine {
     script: PathBuf,
@@ -61,99 +61,70 @@ impl Engine {
 
     pub fn run(
         &self,
-        width: u32,
-        height: u32,
-        scale: f32,
+        scale: impl Into<Scale>,
         params: &[(String, Option<String>)],
     ) -> anywho::Result<()> {
-        let viewport = Viewport {
-            width,
-            height,
-            scale,
-        };
+        let scale = scale.into();
+
         let script_dir = self
             .script
             .parent()
             .map(|dir| dir.to_path_buf())
             .unwrap_or_default();
 
-        image::install(&self.lua, &self.env, &script_dir, viewport)?;
+        image::install(&self.lua, &self.env, &script_dir, scale)?;
         font::install(&self.lua, &self.env, &script_dir)?;
         rectangle::install(&self.lua, &self.env)?;
-        text::install(&self.lua, &self.env, viewport)?;
-        stream::install(&self.lua, &self.env, viewport)?;
-
-        self.env.set(
-            "width",
-            self.lua
-                .create_function(move |_lua, _args: ()| -> mlua::Result<u32> { Ok(width) })?,
-        )?;
-        self.env.set(
-            "height",
-            self.lua
-                .create_function(move |_lua, _args: ()| -> mlua::Result<u32> { Ok(height) })?,
-        )?;
-
-        self.env.set(
-            "physical_width",
-            self.lua
-                .create_function(move |_lua, _args: ()| -> mlua::Result<u32> {
-                    Ok(viewport.physical_width())
-                })?,
-        )?;
-        self.env.set(
-            "physical_height",
-            self.lua
-                .create_function(move |_lua, _args: ()| -> mlua::Result<u32> {
-                    Ok(viewport.physical_height())
-                })?,
-        )?;
+        text::install(&self.lua, &self.env, scale)?;
+        stream::install(&self.lua, &self.env, scale)?;
 
         let frames = Rc::new(RefCell::new(Vec::new()));
         let yielded = frames.clone();
+
         self.env.set(
             "yield",
             self.lua
                 .create_function(move |_lua, frame: AnyUserData| -> mlua::Result<()> {
                     let frame = frame.borrow::<Image>()?;
-                    let (frame_width, frame_height) =
-                        (frame.physical_width(), frame.physical_height());
-                    let (physical_width, physical_height) =
-                        (viewport.physical_width(), viewport.physical_height());
-                    if (frame_width, frame_height) != (physical_width, physical_height) {
-                        return Err(mlua::Error::RuntimeError(format!(
-                            "yield: the frame is {frame_width}×{frame_height}, the viewport is {physical_width}×{physical_height}"
-                        )));
-                    }
-
                     let frame_number = yielded.borrow().len() + 1;
+
                     eprintln!(
-                        "yield: frame {frame_number} ({frame_width}×{frame_height})"
+                        "yield: frame {frame_number} ({}×{})",
+                        frame.width(),
+                        frame.height()
                     );
+
                     yielded.borrow_mut().push((*frame).clone());
+
                     Ok(())
                 })?,
         )?;
 
         let args = self.lua.create_table()?;
+        args.set("scale", f32::from(scale))?;
+
         for (name, value) in params {
             args.set(name.as_str(), value.clone())?;
         }
+
         self.render.call::<()>(args)?;
 
         let frames = frames.borrow();
+
         match frames.len() {
             1 => {
                 frames[0].write()?;
+
                 eprintln!(
                     "output: output.png ({}×{})",
-                    frames[0].physical_width(),
-                    frames[0].physical_height()
+                    frames[0].width(),
+                    frames[0].height()
                 );
             }
             0 => {}
             _ => return Err(anywho!("the MP4 path lands in Phase 9")),
         }
+
         Ok(())
     }
 }
@@ -167,6 +138,12 @@ fn arguments(script: &Path, env: &Table) -> anywho::Result<Vec<String>> {
 
     for (i, argument) in arguments.sequence_values().enumerate() {
         match argument {
+            Ok(name) if name == "scale" => {
+                return Err(anywho!(
+                    "script {}: 'scale' is a reserved argument name",
+                    script.display()
+                ));
+            }
             Ok(name) => names.push(name),
             Err(error) => {
                 return Err(anywho!(

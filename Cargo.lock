@@ -633,6 +633,7 @@ dependencies = [
  "parlance",
  "parley",
  "skrifa",
+ "thiserror",
  "vello_cpu",
 ]
 

@@ -4,10 +4,10 @@ use mlua::{
     Lua, MetaMethod, ObjectLike, Result, Table, UserData, UserDataFields, UserDataMethods, Value,
 };
 
-use crate::{Image, Viewport};
+use crate::{Image, Scale};
 
 pub struct Stream {
-    viewport: Viewport,
+    scale: Scale,
     done: RefCell<bool>,
 }
 
@@ -24,24 +24,20 @@ impl UserData for Stream {
                     return Ok(Value::Nil);
                 }
                 *this.done.borrow_mut() = true;
-                let frame = lua.create_userdata(Image::transparent(
-                    this.viewport.physical_width(),
-                    this.viewport.physical_height(),
-                    this.viewport,
-                ))?;
+                let frame = lua.create_userdata(Image::transparent(1.0, 1.0, this.scale)?)?;
                 Ok(frame.to_value())
             },
         );
     }
 }
 
-pub fn install(lua: &Lua, env: &Table, viewport: Viewport) -> anywho::Result<()> {
+pub fn install(lua: &Lua, env: &Table, scale: Scale) -> anywho::Result<()> {
     env.set(
         "spawn",
         lua.create_function(
             move |_lua, (_program, _args): (String, Table)| -> Result<Stream> {
                 Ok(Stream {
-                    viewport,
+                    scale,
                     done: RefCell::new(false),
                 })
             },
