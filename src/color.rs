@@ -123,32 +123,19 @@ pub fn encode_u8(stored: f32) -> u8 {
     (stored * 255.0).round() as u8
 }
 
+// The Rec. 709 luma weights (the sum is 1).
+const LUMA_R: f64 = 0.2126;
+const LUMA_G: f64 = 0.7152;
+const LUMA_B: f64 = 0.0722;
+
 /// The Rec. 709 luma of a stored sRGB pixel (0-255 channels), 0-255.
 pub fn luma(pixel: [u8; 3]) -> f64 {
-    0.2126 * pixel[0] as f64 + 0.7152 * pixel[1] as f64 + 0.0722 * pixel[2] as f64
+    LUMA_R * pixel[0] as f64 + LUMA_G * pixel[1] as f64 + LUMA_B * pixel[2] as f64
 }
 
-/// The ITU-R 601 luma of a stored sRGB pixel — the stretch's histogram
-/// channel.
-pub fn luma601(pixel: [u8; 3]) -> u8 {
-    (((pixel[0] as u32) * 19595 + (pixel[1] as u32) * 38470 + (pixel[2] as u32) * 7471 + 0x8000)
-        >> 16) as u8
-}
-
-/// The tone-preserving stretch's point map: the stored 8-bit values
-/// over [lo, hi] (the histogram's extent on the 601 luma channel)
-/// mapped to [0, 255]; degenerate (hi <= lo) is the identity.
-pub fn stretch_lut(lo: u32, hi: u32) -> [u8; 256] {
-    let map: Vec<u8> = if hi <= lo {
-        (0u8..=255).collect()
-    } else {
-        let scale = 255.0 / (hi - lo) as f64;
-        let offset = -(lo as f64) * scale;
-        (0u8..=255)
-            .map(|value| ((value as f64) * scale + offset).trunc().clamp(0.0, 255.0) as u8)
-            .collect()
-    };
-    map.try_into().unwrap()
+/// The Rec. 709 luma of a linear-light pixel (0-1 channels), 0-1.
+pub fn luma_linear(r: f32, g: f32, b: f32) -> f32 {
+    LUMA_R as f32 * r + LUMA_G as f32 * g + LUMA_B as f32 * b
 }
 
 /// The resize's resampling kernel.

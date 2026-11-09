@@ -79,7 +79,7 @@ From the design review (2026-11-08):
   boundary stays straight RGBA8 sRGB (§3b). The linear composite is
   `layer + base·(1 − layer.a)`: no division, and a 0 or 1 alpha on
   either side exact. Premultiplication discards a fully transparent
-  pixel's color — the stored-channel ops (`luma_at`, the contrast
+  pixel's color — the stored-channel ops (`luma_at`, the autocontrast
   histogram) read it as colorless — exact while the region is opaque,
   a representation limit otherwise.
 - **`text` anchor:** the tight ink box's top-left lands at `(x, y)`.
@@ -229,7 +229,7 @@ pikke/
                  own scale (the file's at load, the run's after a
                  resample; §2's form); the API reports logical. Its
                  ops: load (PNG, the straight RGBA8 sRGB boundary,
-                 §3b), resize / contrast / blend / fill / luma_at /
+                 §3b), resize / autocontrast / blend / fill / luma_at /
                  width / height / size.
     color.rs     the `Color` and the pinned transfer math: the IEC
                  61966-2-1 sRGB ↔ linear conversion (evaluated
@@ -339,8 +339,12 @@ linear.
 geometry exact (aspect preserved, cover center-cropped, exact box),
 within a few units.
 
-**Phase 5b — `contrast`.** The real contrast (auto, the
-tone-preserving stretch; a free op), run in linear.
+**Phase 5b — `autocontrast`.** The real autocontrast (the
+tone-preserving stretch; a free op), run in linear: the histogram's
+extent is the Rec. 709 luma of the stored (premultiplied) channels,
+and the ramp — the identity off the extent (the no-clip), the
+stretch to the full range within it — runs on the f32 values, so the
+buffer's single encode rounding stays at the boundary.
 *Gate:* on the sample backgrounds, headless: the stretch is
 full-range and tone-preserving (no highlight/shadow clip).
 
@@ -420,7 +424,7 @@ question for engine outputs.
   scale at the first op that needs it there (the `resize`, or the
   composite when the layer is still at its file scale), so no path
   pays a double resampling.
-- **`contrast` order:** the script resizes (cover) then stretches —
+- **`autocontrast` order:** the script resizes (cover) then stretches —
   the histogram's tail moves slightly with the crop.
 - **No producer retry** (settled): a transient producer failure
   (truncated stream, crash) fails the run and is re-run by hand.
@@ -432,5 +436,5 @@ question for engine outputs.
 
 ## 9. Next
 
-The phase ladder is settled (§7); the next working step is Phase 5b
-(`contrast` — the auto stretch).
+The phase ladder is settled (§7); the next working step is Phase 6
+(the compositing: `blend`, `fill`, `luma_at`, and the `Rectangle`).

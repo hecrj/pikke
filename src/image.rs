@@ -6,7 +6,7 @@ use image::{ColorType, ImageFormat};
 use mlua::{AnyUserData, Lua, Result, Table, UserData, UserDataFields, UserDataMethods};
 
 use crate::Viewport;
-use crate::color::{Color, Filter, crop, resize};
+use crate::color::{Color, Filter, crop, luma_linear, resize};
 
 /// The RGBA buffer: premultiplied f32 linear (0-1) planes, the pixel
 /// dims at `scale`; the API reports logical.
@@ -155,6 +155,49 @@ impl Image {
         self.scale = scale;
     }
 
+    /// The tone-preserving full-range stretch of the histogram's luma
+    /// extent, run in linear light (the buffer's form) — the single
+    /// encode rounding stays at the boundary.
+    pub fn autocontrast(&mut self) {
+        let count = (self.width * self.height) as usize;
+
+        // The histogram's extent: the linear-light luma of the stored
+        // (premultiplied) channels; a transparent pixel reads as
+        // colorless black.
+        let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+        for i in 0..count {
+            let luma = luma_linear(self.buffer.r[i], self.buffer.g[i], self.buffer.b[i]);
+            lo = lo.min(luma);
+            hi = hi.max(luma);
+        }
+
+        // A degenerate extent (hi <= lo) leaves the buffer unchanged.
+        if hi <= lo {
+            return;
+        }
+
+        // The first in-place write forks a shared buffer (CoW).
+        let buffer = Arc::make_mut(&mut self.buffer);
+
+        // The tone-preserving ramp: the in-extent values stretch to
+        // the full range, the off-extent values keep their tone (no
+        // highlight or shadow clip). The alpha is untouched (not
+        // light).
+        let scale = 1.0 / (hi - lo);
+        let stretch = |value: f32| {
+            if value < lo || value > hi {
+                value
+            } else {
+                (value - lo) * scale
+            }
+        };
+        for i in 0..count {
+            buffer.r[i] = stretch(buffer.r[i]);
+            buffer.g[i] = stretch(buffer.g[i]);
+            buffer.b[i] = stretch(buffer.b[i]);
+        }
+    }
+
     /// The buffer as `output.png` (the working directory): the straight
     /// RGBA8 sRGB form, the buffer's alpha as-is, written atomically.
     pub fn write(&self) -> anywho::Result<()> {
@@ -280,7 +323,8 @@ impl UserData for Image {
             this.resize(width, height, filter, mode);
             Ok(())
         });
-        methods.add_method_mut("contrast", |_lua, _this, _opts: Table| -> Result<()> {
+        methods.add_method_mut("autocontrast", |_lua, this, _args: ()| -> Result<()> {
+            this.autocontrast();
             Ok(())
         });
         methods.add_method_mut(
@@ -328,9 +372,11 @@ pub fn install(
 
 #[cfg(test)]
 mod tests {
-    use super::load;
+    use super::{Buffer, Image, load};
     use crate::Viewport;
+    use crate::color::luma_linear;
     use std::path::Path;
+    use std::sync::Arc;
 
     #[test]
     fn the_base_background_loads_at_its_file_dims() {
@@ -421,5 +467,150 @@ mod tests {
             (image.physical_width(), image.physical_height()),
             (512, 512)
         );
+    }
+
+    /// A row image at the linear-light `pixels` (the buffer's form).
+    fn synthetic_linear(pixels: &[[f32; 4]], viewport: Viewport) -> Image {
+        let plane = |channel: usize| pixels.iter().map(|pixel| pixel[channel]).collect();
+
+        Image {
+            buffer: Arc::new(Buffer {
+                r: plane(0),
+                g: plane(1),
+                b: plane(2),
+                a: plane(3),
+            }),
+            width: pixels.len() as u32,
+            height: 1,
+            scale: 1.0,
+            viewport,
+        }
+    }
+
+    #[test]
+    fn the_autocontrast_is_full_range_and_tone_preserving() {
+        // Grays spanning the luma extent, and a pixel whose channels
+        // all sit outside the extent.
+        let pixels = [
+            [0.3, 0.3, 0.3, 1.0],
+            [0.5, 0.5, 0.5, 1.0],
+            [0.7, 0.7, 0.7, 1.0],
+            [1.0, 0.12, 0.12, 1.0],
+        ];
+
+        let mut image = synthetic_linear(
+            &pixels,
+            Viewport {
+                width: 4,
+                height: 1,
+                scale: 1.0,
+            },
+        );
+        image.autocontrast();
+
+        let lo = luma_linear(0.3, 0.3, 0.3);
+        let hi = luma_linear(0.7, 0.7, 0.7);
+        let scale = 1.0 / (hi - lo);
+
+        // The op runs the tone-preserving ramp over the luma extent:
+        // the in-extent channels stretch, the off-extent ones keep
+        // their tone.
+        for (i, pixel) in pixels.iter().enumerate() {
+            for (value, stretched) in [
+                (pixel[0], image.buffer.r[i]),
+                (pixel[1], image.buffer.g[i]),
+                (pixel[2], image.buffer.b[i]),
+            ] {
+                let expected = if value < lo || value > hi {
+                    value
+                } else {
+                    (value - lo) * scale
+                };
+                assert!((expected - stretched).abs() <= 1e-6);
+            }
+        }
+
+        // The full range: the extent's midpoint holds.
+        assert!((image.buffer.r[1] - 0.5).abs() <= 1e-5);
+
+        // The off-extent channels keep their tone (no clip); the
+        // alpha is untouched.
+        assert_eq!(image.buffer.r[3], 1.0);
+        assert_eq!(image.buffer.g[3], 0.12);
+        assert_eq!(image.buffer.b[3], 0.12);
+        assert_eq!(image.buffer.a[3], 1.0);
+    }
+
+    #[test]
+    fn the_uniform_autocontrast_is_the_identity() {
+        let pixels = [[0.4, 0.3, 0.5, 1.0]; 3];
+
+        let mut image = synthetic_linear(
+            &pixels,
+            Viewport {
+                width: 3,
+                height: 1,
+                scale: 1.0,
+            },
+        );
+        image.autocontrast();
+
+        // A degenerate extent (one luma) leaves the buffer unchanged.
+        for i in 0..3 {
+            assert_eq!(image.buffer.r[i], 0.4);
+            assert_eq!(image.buffer.g[i], 0.3);
+            assert_eq!(image.buffer.b[i], 0.5);
+        }
+    }
+
+    #[test]
+    fn the_sky_background_autocontrast_applies_the_ramp() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("personal/images/sky-night.png");
+        let mut image = load(
+            &path,
+            Viewport {
+                width: 1640,
+                height: 2048,
+                scale: 1.0,
+            },
+        )
+        .unwrap();
+
+        let count = (image.width * image.height) as usize;
+        let (r, g, b) = (
+            image.buffer.r.clone(),
+            image.buffer.g.clone(),
+            image.buffer.b.clone(),
+        );
+
+        let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+        for i in 0..count {
+            let luma = luma_linear(r[i], g[i], b[i]);
+            lo = lo.min(luma);
+            hi = hi.max(luma);
+        }
+
+        // A real extent, not a degenerate one.
+        assert!(hi > lo);
+
+        image.autocontrast();
+        let scale = 1.0 / (hi - lo);
+
+        // The op applies the ramp to the whole image: the in-extent
+        // channels stretch, the off-extent ones keep their tone.
+        for i in 0..count {
+            for (value, stretched) in [
+                (r[i], image.buffer.r[i]),
+                (g[i], image.buffer.g[i]),
+                (b[i], image.buffer.b[i]),
+            ] {
+                let expected = if value < lo || value > hi {
+                    value
+                } else {
+                    (value - lo) * scale
+                };
+                assert!((expected - stretched).abs() <= 1e-6, "pixel {i}");
+            }
+        }
     }
 }

@@ -96,7 +96,7 @@ bottom edge `height()`. Origin top-left; +x right, +y down.
 | op | signature | meaning |
 |---|---|---|
 | `clone` | `img:clone() → Image` | A copy sharing `img`'s buffer (cheap); the copy diverges from `img` (copy-on-write) on its first in-place write. The branch point. |
-| `contrast` | `img:contrast({auto=true})` | Histogram-stretch to full range, **tone-preserving** (no highlight/shadow clip). In place. |
+| `autocontrast` | `img:autocontrast()` | Histogram-stretch to full range, **tone-preserving** (no highlight/shadow clip). In place. |
 | `resize` | `img:resize({width, height, mode, filter})` | Scale to the target (logical px): exactly one of `width`/`height` — aspect preserved; both — the target box, `mode = "cover"` covers it and center-crops, no `mode` scales to it exactly; `filter = "lanczos"` or `"cubic"` (default). In place. |
 | `blend` | `img:blend(other, {at, color_space})` | Alpha-composite `other` over `img`, `other`'s top-left at `at` (a `Rectangle`, default `(0, 0)`), clipped to the canvas. `color_space`: `"linear"` (default) / `"srgb"`. In place. |
 | `fill` | `img:fill(region, color)` | Paint `region` (a `Rectangle` or `Text`) with `color` (hex). The space is chosen by the region's kind: a `Text` region composites in sRGB, a `Rectangle` region in linear. In place. |
@@ -120,7 +120,7 @@ bottom edge `height()`. Origin top-left; +x right, +y down.
 
 ## Execution model
 
-- **In-place ops; one explicit copy.** The pixel ops (`contrast`,
+- **In-place ops; one explicit copy.** The pixel ops (`autocontrast`,
   `resize`, `blend`, `fill`) mutate the receiver in place and return
   nothing. `clone()` is the model's only copy and the branch point:
   fork a canvas, paint on it, `clone()` to start a fresh one.
@@ -144,7 +144,7 @@ bottom edge `height()`. Origin top-left; +x right, +y down.
   is `layer + base·(1 − layer.a)` — no division, and a 0 or 1 alpha
   on either side falls out of the formula exactly. A fully
   transparent pixel's color is discarded with the alpha — the ops
-  defined on stored channels (the luma, the contrast histogram) read
+  defined on stored channels (the luma, the autocontrast histogram) read
   such a pixel as colorless; exact while the region is opaque.
 - **`text` is sRGB, always.** Type is authored in sRGB; no opt-out.
 - **Opt-in sRGB.** `color_space = "srgb"` switches a `blend` to sRGB
