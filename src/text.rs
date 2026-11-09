@@ -225,6 +225,12 @@ impl UserData for Text {
     }
 
     fn add_methods<M: UserDataMethods<Text>>(methods: &mut M) {
+        methods.add_method("width", |_lua, this, _args: ()| -> Result<f64> {
+            Ok(this.width as f64 / this.scale as f64)
+        });
+        methods.add_method("height", |_lua, this, _args: ()| -> Result<f64> {
+            Ok(this.height as f64 / this.scale as f64)
+        });
         methods.add_method("bounds", |_lua, this, _args: ()| -> Result<Rectangle> {
             Ok(Rectangle::new(
                 this.x as f32 / this.scale,
@@ -232,6 +238,33 @@ impl UserData for Text {
                 this.width as f32 / this.scale,
                 this.height as f32 / this.scale,
             ))
+        });
+        methods.add_method_mut("translate", |_lua, this, offset: Table| -> Result<()> {
+            let number = |name: &str, value: Option<Value>| -> Result<f32> {
+                match value {
+                    None => Ok(0.0),
+                    Some(Value::Number(value)) => Ok(value as f32),
+                    Some(Value::Integer(value)) => Ok(value as f32),
+                    Some(_) => Err(mlua::Error::RuntimeError(format!(
+                        "translate: '{name}' is not a number"
+                    ))),
+                }
+            };
+            let dx = number("x", offset.get("x")?)?;
+            let dy = number("y", offset.get("y")?)?;
+            if !dx.is_finite() {
+                return Err(mlua::Error::RuntimeError(
+                    "translate: 'x' must be finite".to_owned(),
+                ));
+            }
+            if !dy.is_finite() {
+                return Err(mlua::Error::RuntimeError(
+                    "translate: 'y' must be finite".to_owned(),
+                ));
+            }
+            this.x += (dx * this.scale).round() as i32;
+            this.y += (dy * this.scale).round() as i32;
+            Ok(())
         });
     }
 }
@@ -477,5 +510,136 @@ mod tests {
         opts.set("size", 100.0).unwrap();
         opts.set("y", f64::INFINITY).unwrap();
         assert!(eval(opts).contains("text: 'y' must be finite"));
+    }
+
+    fn text_value(x: i32, y: i32, scale: f32) -> (Lua, Table, AnyUserData) {
+        let lua = Lua::new();
+        let text = Text {
+            x,
+            y,
+            width: 100,
+            height: 50,
+            scale,
+            ink_min: (0.0, 0.0),
+            layout: Layout::new(),
+        };
+        let value = lua.create_userdata(text).unwrap();
+        let env = lua.create_table().unwrap();
+        env.set("text", value.clone()).unwrap();
+        (lua, env, value)
+    }
+
+    #[test]
+    fn the_width_and_height_report_logical_px() {
+        let (lua, env, _text) = text_value(10, 20, 0.5);
+        let width: f64 = lua
+            .load("text:width()")
+            .set_environment(env.clone())
+            .eval()
+            .unwrap();
+        let height: f64 = lua
+            .load("text:height()")
+            .set_environment(env)
+            .eval()
+            .unwrap();
+        assert_eq!((width, height), (200.0, 100.0));
+    }
+
+    #[test]
+    fn the_translate_moves_the_anchor() {
+        let (lua, env, text) = text_value(10, 20, 1.0);
+
+        let offset = lua.create_table().unwrap();
+        offset.set("x", 5.0).unwrap();
+        offset.set("y", -30.0).unwrap();
+        env.set("offset", offset).unwrap();
+        lua.load("text:translate(offset)")
+            .set_environment(env.clone())
+            .eval::<()>()
+            .unwrap();
+        let moved = text.borrow::<Text>().unwrap().clone();
+        assert_eq!((moved.x, moved.y), (15, -10));
+
+        let empty = lua.create_table().unwrap();
+        env.set("offset", empty).unwrap();
+        lua.load("text:translate(offset)")
+            .set_environment(env.clone())
+            .eval::<()>()
+            .unwrap();
+        let moved = text.borrow::<Text>().unwrap().clone();
+        assert_eq!((moved.x, moved.y), (15, -10));
+
+        let offset = lua.create_table().unwrap();
+        offset.set("x", 7).unwrap();
+        env.set("offset", offset).unwrap();
+        lua.load("text:translate(offset)")
+            .set_environment(env)
+            .eval::<()>()
+            .unwrap();
+        let moved = text.borrow::<Text>().unwrap().clone();
+        assert_eq!((moved.x, moved.y), (22, -10));
+    }
+
+    #[test]
+    fn the_translate_rounds_at_the_run_scale() {
+        let (lua, env, text) = text_value(20, 40, 2.0);
+        let offset = lua.create_table().unwrap();
+        offset.set("x", 1.5).unwrap();
+        offset.set("y", -2.5).unwrap();
+        env.set("offset", offset).unwrap();
+        lua.load("text:translate(offset)")
+            .set_environment(env)
+            .eval::<()>()
+            .unwrap();
+        let moved = text.borrow::<Text>().unwrap().clone();
+        assert_eq!((moved.x, moved.y), (23, 35));
+    }
+
+    #[test]
+    fn the_translate_is_reflected_in_bounds() {
+        let (lua, env, text) = text_value(10, 20, 1.0);
+        let offset = lua.create_table().unwrap();
+        offset.set("y", -5.0).unwrap();
+        env.set("offset", offset).unwrap();
+        lua.load("text:translate(offset)")
+            .set_environment(env.clone())
+            .eval::<()>()
+            .unwrap();
+        let bounds: AnyUserData = lua
+            .load("text:bounds()")
+            .set_environment(env)
+            .eval()
+            .unwrap();
+        let bounds = *bounds.borrow::<Rectangle>().unwrap();
+        assert_eq!((bounds.x, bounds.y), (10.0, 15.0));
+        let moved = text.borrow::<Text>().unwrap().clone();
+        assert_eq!(moved.y, 15);
+    }
+
+    #[test]
+    fn the_translate_validates_its_arguments() {
+        let (lua, env, _text) = text_value(10, 20, 1.0);
+
+        let offset = lua.create_table().unwrap();
+        offset.set("x", "left").unwrap();
+        env.set("offset", offset).unwrap();
+        let error = lua
+            .load("text:translate(offset)")
+            .set_environment(env.clone())
+            .eval::<()>()
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("translate: 'x' is not a number"));
+
+        let offset = lua.create_table().unwrap();
+        offset.set("y", f64::INFINITY).unwrap();
+        env.set("offset", offset).unwrap();
+        let error = lua
+            .load("text:translate(offset)")
+            .set_environment(env)
+            .eval::<()>()
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("translate: 'y' must be finite"));
     }
 }

@@ -259,9 +259,11 @@ pikke/
                  collection (the file's bytes; the path relative to
                  the script)
     text.rs      the `Text`: the parley layout at the run scale,
-                 the pixel-free ink probe, the ink box, `bounds`
-                 — `fill` does the skrifa outlines → vello
-                 rasterization
+                 the pixel-free ink probe, the ink box, the
+                 `bounds`/`width`/`height` accessors (logical px),
+                 `translate` (the logical offsets, rounded at the
+                 run scale) — `fill` does the skrifa outlines →
+                 vello rasterization
     rectangle.rs the `Rectangle` and `padded`
     stream.rs    the `Stream`: the `spawn`'d producer protocol — the
                  stdout frame reader, the stderr drain thread (bounded
