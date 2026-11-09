@@ -4,7 +4,9 @@ use std::sync::Arc;
 use anywho::anywho;
 use image::{ColorType, ImageFormat};
 use mlua::{AnyUserData, Lua, Result, Table, UserData, UserDataFields, UserDataMethods};
-use vello_cpu::kurbo::{Affine, Rect};
+use skrifa::outline::{OutlineGlyphCollection, OutlinePen};
+use skrifa::prelude::{FontRef, GlyphId, LocationRef, NormalizedCoord, Size};
+use vello_cpu::kurbo::{Affine, BezPath, Rect};
 use vello_cpu::{
     Pixmap, RenderContext, Resources,
     color::{AlphaColor, Srgb},
@@ -299,6 +301,111 @@ impl Image {
         }
     }
 
+    pub fn fill_text(&mut self, text: &Text, paint: Color) {
+        let (box_x, box_y) = (text.x, text.y);
+        let (box_width, box_height) = (text.width, text.height);
+        if box_width == 0 || box_height == 0 {
+            return;
+        }
+
+        let (scratch_width, scratch_height) = (box_width + 2, box_height + 2);
+        let (origin_x, origin_y) = (box_x - 1, box_y - 1);
+        let (layout_x, layout_y) = (box_x as f32 - text.ink_min.0, box_y as f32 - text.ink_min.1);
+
+        let mut resources = Resources::new();
+        let mut context = RenderContext::new(scratch_width as u16, scratch_height as u16);
+        context.set_transform(Affine::translate((
+            (layout_x - origin_x as f32) as f64,
+            (layout_y - origin_y as f32) as f64,
+        )));
+        context.set_paint(AlphaColor::<Srgb>::BLACK);
+
+        for run in text.runs() {
+            for glyph in run.glyphs() {
+                let Some(font) =
+                    FontRef::from_index(glyph.font.data.as_ref(), glyph.font.index).ok()
+                else {
+                    continue;
+                };
+                let collection = OutlineGlyphCollection::new(&font);
+                let Some(glyph_outline) = collection.get(GlyphId::new(glyph.id)) else {
+                    continue;
+                };
+                let coords: Vec<NormalizedCoord> = glyph
+                    .location
+                    .iter()
+                    .map(|coord| NormalizedCoord::from_bits(coord.to_bits()))
+                    .collect();
+                let location = LocationRef::new(&coords);
+                let mut pen = PathPen::new();
+                let Ok(_) = glyph_outline.draw((Size::new(glyph.size), location), &mut pen) else {
+                    continue;
+                };
+                let mut path = pen.path;
+                path.apply_affine(Affine::new([
+                    1.0,
+                    0.0,
+                    0.0,
+                    -1.0,
+                    glyph.x as f64,
+                    glyph.y as f64,
+                ]));
+                context.fill_path(&path);
+            }
+        }
+
+        let mut pixmap = Pixmap::new(scratch_width as u16, scratch_height as u16);
+        context.render(&mut pixmap, &mut resources);
+
+        let buffer = Arc::make_mut(&mut self.buffer);
+        let (base_r, base_g, base_b, base_a) =
+            (&mut buffer.r, &mut buffer.g, &mut buffer.b, &mut buffer.a);
+        for (y, row) in pixmap
+            .data()
+            .chunks_exact(scratch_width as usize)
+            .enumerate()
+        {
+            for (x, pixel) in row.iter().enumerate() {
+                let cover = pixel.a as f32 / 255.0;
+                if cover <= 0.0 {
+                    continue;
+                }
+                let canvas_x = origin_x + x as i32;
+                let canvas_y = origin_y + y as i32;
+                let inside_box = (box_x..box_x + box_width as i32).contains(&canvas_x)
+                    && (box_y..box_y + box_height as i32).contains(&canvas_y);
+                let inside_canvas = canvas_x >= 0
+                    && canvas_x < self.width as i32
+                    && canvas_y >= 0
+                    && canvas_y < self.height as i32;
+                if !inside_box || !inside_canvas {
+                    continue;
+                }
+                let i = (canvas_y * self.width as i32 + canvas_x) as usize;
+                let base = Color {
+                    r: base_r[i],
+                    g: base_g[i],
+                    b: base_b[i],
+                    a: base_a[i],
+                };
+                let layer = Color {
+                    r: paint.r * cover,
+                    g: paint.g * cover,
+                    b: paint.b * cover,
+                    a: cover,
+                };
+                let blended = base
+                    .linear_to_srgb()
+                    .over(layer.linear_to_srgb())
+                    .srgb_to_linear();
+                base_r[i] = blended.r;
+                base_g[i] = blended.g;
+                base_b[i] = blended.b;
+                base_a[i] = blended.a;
+            }
+        }
+    }
+
     pub fn luma_at(&self, region: Rectangle) -> f32 {
         let left = self.viewport.to_physical_signed(region.x);
         let top = self.viewport.to_physical_signed(region.y);
@@ -373,6 +480,53 @@ fn load(path: &Path, viewport: Viewport) -> anywho::Result<Image> {
         scale: 1.0,
         viewport,
     })
+}
+
+struct PathPen {
+    path: BezPath,
+}
+
+impl PathPen {
+    fn new() -> PathPen {
+        PathPen {
+            path: BezPath::new(),
+        }
+    }
+}
+
+impl OutlinePen for PathPen {
+    fn move_to(&mut self, x: f32, y: f32) {
+        self.path.move_to((x as f64, y as f64));
+    }
+
+    fn line_to(&mut self, x: f32, y: f32) {
+        self.path.line_to((x as f64, y as f64));
+    }
+
+    fn quad_to(&mut self, control_x: f32, control_y: f32, x: f32, y: f32) {
+        self.path
+            .quad_to((control_x as f64, control_y as f64), (x as f64, y as f64));
+    }
+
+    fn curve_to(
+        &mut self,
+        control_x: f32,
+        control_y: f32,
+        control1_x: f32,
+        control1_y: f32,
+        x: f32,
+        y: f32,
+    ) {
+        self.path.curve_to(
+            (control_x as f64, control_y as f64),
+            (control1_x as f64, control1_y as f64),
+            (x as f64, y as f64),
+        );
+    }
+
+    fn close(&mut self) {
+        self.path.close_path();
+    }
 }
 
 fn paint_from_hex(color: &str) -> Result<Color> {
@@ -508,11 +662,12 @@ impl UserData for Image {
                         Ok(())
                     }
                     Err(_) => {
-                        region.borrow::<Text>().map_err(|_| {
+                        let text = region.borrow::<Text>().map_err(|_| {
                             mlua::Error::RuntimeError(
                                 "fill: the region must be a `Rectangle` or a `Text`".to_owned(),
                             )
                         })?;
+                        this.fill_text(&text, paint);
                         Ok(())
                     }
                 }
@@ -1224,7 +1379,9 @@ mod tests {
         let region = lua
             .create_userdata(Rectangle::new(0.0, 0.0, 2.0, 2.0))
             .unwrap();
-        let text = lua.create_userdata(Text).unwrap();
+        let text = lua
+            .create_userdata(Text::new("Any Family", 100.0, 400.0, 0.0, 0.0, 1.0, ""))
+            .unwrap();
 
         let env = lua.create_table().unwrap();
         env.set("output", output.clone()).unwrap();
@@ -1263,5 +1420,146 @@ mod tests {
         let painted = output.borrow::<Image>().unwrap().clone();
         assert!(painted.buffer.r[5] > 0.0);
         assert_eq!(painted.buffer.a[5], 1.0);
+    }
+
+    fn register_vendored_font() {
+        let lua = Lua::new();
+        let env = lua.create_table().unwrap();
+        let script_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fonts");
+        crate::font::install(&lua, &env, &script_dir).unwrap();
+        let font: mlua::Function = env.get("font").unwrap();
+        font.call::<mlua::AnyUserData>("NotoSans-Regular.ttf")
+            .unwrap();
+    }
+
+    #[test]
+    fn the_fill_text_paints_the_ink_in_the_pinned_srgb_space() {
+        register_vendored_font();
+        let text = Text::new("Noto Sans", 100.0, 400.0, 10.0, 10.0, 1.0, "N");
+        assert!(text.width > 0 && text.height > 0);
+
+        let viewport = Viewport {
+            width: 200,
+            height: 200,
+            scale: 1.0,
+        };
+        let mut image = Image::transparent(200, 200, viewport);
+        let paint = Color::from_rgba_u8([200, 30, 60, 255]).srgb_to_linear();
+        image.fill_text(&text, paint);
+
+        let painted = image.to_rgba8();
+        let (box_x, box_y) = (text.x as u32, text.y as u32);
+        let (box_width, box_height) = (text.width, text.height);
+        let mut solid = 0;
+        let mut partial = 0;
+        for y in 0..200u32 {
+            for x in 0..200u32 {
+                let pixel = (y * 200 + x) as usize * 4;
+                let inside =
+                    (x >= box_x && x < box_x + box_width) && (y >= box_y && y < box_y + box_height);
+                if inside {
+                    let alpha = painted[pixel + 3];
+                    if alpha == 255 {
+                        assert_eq!(
+                            &painted[pixel..pixel + 4],
+                            &[200, 30, 60, 255],
+                            "pixel ({x}, {y})"
+                        );
+                        solid += 1;
+                    } else if alpha >= 128 {
+                        assert!(
+                            painted[pixel].abs_diff(200) <= 2
+                                && painted[pixel + 1].abs_diff(30) <= 2
+                                && painted[pixel + 2].abs_diff(60) <= 2,
+                            "pixel ({x}, {y})"
+                        );
+                        partial += 1;
+                    } else if alpha > 0 {
+                        partial += 1;
+                    } else {
+                        assert_eq!(&painted[pixel..pixel + 4], &[0, 0, 0, 0]);
+                    }
+                } else {
+                    assert_eq!(
+                        &painted[pixel..pixel + 4],
+                        &[0, 0, 0, 0],
+                        "pixel ({x}, {y})"
+                    );
+                }
+            }
+        }
+        assert!(solid > 20);
+        assert!(partial > 0);
+    }
+
+    #[test]
+    fn the_fill_text_is_a_no_op_for_degenerate_text() {
+        let viewport = Viewport {
+            width: 4,
+            height: 4,
+            scale: 1.0,
+        };
+        let mut image = Image::transparent(4, 4, viewport);
+        let paint = Color::from_rgba_u8([255, 255, 255, 255]).srgb_to_linear();
+
+        let empty = Text::new("Noto Sans", 100.0, 400.0, 0.0, 0.0, 1.0, "");
+        image.fill_text(&empty, paint);
+
+        register_vendored_font();
+        let unregistered = Text::new(
+            "An Unregistered Family",
+            100.0,
+            400.0,
+            0.0,
+            0.0,
+            1.0,
+            "Noto",
+        );
+        image.fill_text(&unregistered, paint);
+
+        assert!(image.to_rgba8().iter().all(|&byte| byte == 0));
+    }
+
+    #[test]
+    fn the_fill_text_clips_at_the_canvas_corner() {
+        register_vendored_font();
+        let text = Text::new("Noto Sans", 100.0, 400.0, -5.0, -5.0, 1.0, "N");
+        assert!(text.width > 0 && text.height > 0);
+
+        let viewport = Viewport {
+            width: 200,
+            height: 200,
+            scale: 1.0,
+        };
+        let mut image = Image::transparent(200, 200, viewport);
+        let paint = Color::from_rgba_u8([200, 30, 60, 255]).srgb_to_linear();
+        image.fill_text(&text, paint);
+
+        let painted = image.to_rgba8();
+        let mut solid = 0;
+        for y in 0..200u32 {
+            for x in 0..200u32 {
+                let pixel = (y * 200 + x) as usize * 4;
+                let alpha = painted[pixel + 3];
+                if alpha == 255 {
+                    assert_eq!(
+                        &painted[pixel..pixel + 4],
+                        &[200, 30, 60, 255],
+                        "pixel ({x}, {y})"
+                    );
+                    solid += 1;
+                } else if alpha >= 128 {
+                    assert!(
+                        painted[pixel].abs_diff(200) <= 2
+                            && painted[pixel + 1].abs_diff(30) <= 2
+                            && painted[pixel + 2].abs_diff(60) <= 2,
+                        "pixel ({x}, {y})"
+                    );
+                }
+            }
+        }
+        let pixel = (2 * 200 + 2) as usize * 4;
+        assert_eq!(&painted[pixel..pixel + 4], &[200, 30, 60, 255]);
+        assert!(solid > 20);
     }
 }

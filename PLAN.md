@@ -137,7 +137,8 @@ record where they occur and folded back into DESIGN.md later:
   sub-pixel coverage) and the pinned paint composited over the buffer
   with the pinned `over` — a paint span is sub-pixel geometry, so the
   geometry-rounding clause does not apply to it. A `Text` region is
-  accepted but carries no paint while `text` is mocked. A
+  painted by `fill` (the skrifa outlines → the vello raster, §7)
+  with its ink's top-left pinned exactly to `(x, y)`. A
   non-finite or non-positive span paints nothing. `--width`/`--height`
   are capped at 65535 (the rasterizer's surface bound).
 - **Geometry rounding:** positions, sizes and resize targets are real
@@ -254,12 +255,13 @@ pikke/
                  `round`), Porter-Duff over
                  in linear and sRGB, the Rec. 709 luma, the
                  tone-preserving full-range stretch
-    font.rs      the `Font`: the file loaded via cosmic-text's
-                 `FontSet` (from the file's bytes; the path relative
-                 to the script), the `wght` weight axis (a swash
-                 variation, set when the file carries it)
-    text.rs      the `Text`: the layout (the ink-offset probe, the
-                 anchor), the ink-cropped pixels, `bounds`
+    font.rs      the `Font`: the face registered in the fontique
+                 collection (the file's bytes; the path relative to
+                 the script)
+    text.rs      the `Text`: the parley layout at the run scale,
+                 the pixel-free ink probe, the ink box, `bounds`
+                 — `fill` does the skrifa outlines → vello
+                 rasterization
     rectangle.rs the `Rectangle` and `padded`
     stream.rs    the `Stream`: the `spawn`'d producer protocol — the
                  stdout frame reader, the stderr drain thread (bounded
@@ -270,8 +272,9 @@ pikke/
 Dependencies: `mlua` with the vendored Lua 5.4 (no system Lua),
 `image` (PNG codec only — its resampler is u8-only, so the linear-f32
 Lanczos is home-grown; see the Linear-U8-Is-Always-Wrong notice),
-`cosmic-text` for the text (swash shaping/rasterization + fontdb file
-loading — pure Rust).
+`parley` for the text layout, `fontique` for the font file loading,
+`skrifa` for the glyph outlines (the existing `vello` rasterizes the
+fill) — pure Rust.
 No argument-parsing crate: the CLI is hand-rolled — one `while let`
 pass over `std::env::args()` with a `match` per argument: boolean
 flags, `--flag value` arms (the value is the next argument), unknown
@@ -417,18 +420,27 @@ errors and accepts `Text`; the smoke's `padded(30)` box lands
 byte-exact at the corner (PIL). The `Text` region's real sRGB ink
 paint is verified with the real text in Phase 7.
 
-**Phase 7 — text.** `font.rs` + `text.rs` on `cosmic-text` (the face
-via `FontSet` from the file's bytes — the path relative to the
-script —, swash shaping + rasterization at the run scale): the `wght`
-axis (a swash variation, set when the file carries it — the
-example's variable font does, its static font does not), the layout,
-the ink-offset probe (the union of the glyphs' ink), the anchor (the
-tight ink box's top-left at `(x, y)`), `bounds`. Shaping hint
-`Basic` — plain advances, no GPOS (swash kerns by default).
-*Gate:* the script's two texts (a 300-weight variable font, a
-700-weight static font): the ink box's top-left exactly `(x, y)`
-(pinned), the ink box's size within ~1 px of the layout's ink probe,
-the rasterized text clean at its size (free).
+**Phase 7 — text (done).** `font.rs` + `text.rs` on `parley`/
+`fontique`/`skrifa`: `font` registers the face in the shared
+`fontique` collection (the file's bytes, the path relative to the
+script) and hands back a `Font`; `text` lays the string out with
+`parley` at the run scale (quantized, one run styled from the
+`font`/`size`/`weight` opts — `weight` optional, default 400; the
+variable font's `wght` mapped to normalized coords, the static font
+unaffected) and probes the ink without pixels (the skrifa outline
+bboxes). `Text` stores the ink box, the scale, the ink offset and
+the parley `Layout` — no color, no pixels; an empty string or an
+unknown family is a degenerate (empty-layout) `Text`, and `bounds`
+reports the logical box. The paint lands in `fill`: the per-glyph
+skrifa outlines (y-flipped to canvas space, the variable location
+applied) rasterized through `vello` into the ink box plus a 1 px AA
+margin, the ink's top-left pinned exactly to `(x, y)`, composited
+with the pinned sRGB `over`.
+*Gate:* `personal/gate.lua` — the script's two texts (an `Oswald`
+variable font at weight 300, the `AireExterior` static font) on a
+real plate: the ink's top-left exactly `(x, y)` (pinned), the fill
+the hex's own bytes (the fully-covered pixels exact), the plate
+byte-identical outside the ink (PIL).
 
 **Phase 8 — the real Stream.** `spawn`'s producer protocol: the
 stdout frame reader (raw RGBA8, the canvas's physical dims), the
@@ -468,14 +480,15 @@ question for engine outputs.
 
 ## 8. Risks and notes
 
-- **Free ops are chosen, not copied.** The Lanczos resize, the swash
-  rasterization, and the ffmpeg flags are practical choices — none
-  is replicated detail for its own sake. Color accuracy is paramount.
+- **Free ops are chosen, not copied.** The Lanczos resize, the
+  skrifa-outlines → vello rasterization, and the ffmpeg flags are
+  practical choices — none is replicated detail for its own sake.
+  Color accuracy is paramount.
 - **No text supersampling for now:** the glyphs rasterize directly at
-  the run scale. Swash is unhinted, so the small text (a caption
-  line, ~10 physical px at 0.5×) is the risk case — the first fix,
-  if its edges are ragged, is 4× supersampling with a Lanczos
-  downscale.
+  the run scale. skrifa draws unhinted by default, so the small text
+  (a caption line, ~10 physical px at 0.5×) is the risk case — the
+  first fix, if its edges are ragged, is 4× supersampling with a
+  Lanczos downscale.
 - **The engine runs on mlua's safe standard-library subset:**
   parameter introspection is a table read of the script's `arguments`
   declaration (§3b), so no `debug` library is needed — and `package`
@@ -491,13 +504,12 @@ question for engine outputs.
 - **No producer retry** (settled): a transient producer failure
   (truncated stream, crash) fails the run and is re-run by hand.
 - **No system-Lua dependency** (mlua's vendored 5.4); the text stack
-  (`cosmic-text`/`swash`/`fontdb`) is pure Rust — no fontconfig, no
+  (`parley`/`fontique`/`skrifa`) is pure Rust — no fontconfig, no
   libfreetype.
 - **v1's designs are stills-only,** so the MP4 path is exercised
   synthetically; a real animated run is v2.
 
 ## 9. Next
 
-The phase ladder is settled (§7); the next working step is Phase 7
-(text: `font.rs` + `text.rs` on `cosmic-text` — the real glyphs, the
-ink box, and with them the `Text` region's sRGB `fill`).
+The phase ladder is settled (§7); the next working step is Phase 8
+(the real `Stream`: the `spawn`'d producer protocol).

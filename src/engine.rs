@@ -78,9 +78,9 @@ impl Engine {
             .unwrap_or_default();
 
         image::install(&self.lua, &self.env, &script_dir, viewport)?;
-        font::install(&self.lua, &self.env)?;
+        font::install(&self.lua, &self.env, &script_dir)?;
         rectangle::install(&self.lua, &self.env)?;
-        text::install(&self.lua, &self.env)?;
+        text::install(&self.lua, &self.env, viewport)?;
         stream::install(&self.lua, &self.env, viewport)?;
 
         self.env.set(
