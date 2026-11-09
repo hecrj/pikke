@@ -124,8 +124,11 @@ record where they occur and folded back into DESIGN.md later:
   `Rectangle`. `weight` sets the variable font's `wght` axis; a
   static font ignores it.
 - **`luma_at`:** the mean over the region (clipped to the canvas) of
-  the Rec. 709 luma of the region's **stored sRGB** RGB channels
-  (alpha ignored), 0–255.
+  the Rec. 709 luma of the region's **stored (linear,
+  premultiplied)** RGB channels (alpha ignored — a transparent
+  pixel is colorless), × 255 (the linear scale — the same scale as
+  the autocontrast histogram's luma); a region with no canvas
+  overlap — or a negative size — reads 0 (colorless).
 - **Geometry rounding:** positions, sizes and resize targets are real
   px; every geometric result — and the logical → physical transform
   itself — rounds to integer px, ties away from zero (Rust's
@@ -372,8 +375,10 @@ offset and the canvas clip exact.
 
 **Phase 6c — `luma_at`.** The real `luma_at`: the mean, over the
 region (clipped to the canvas), of the Rec. 709 luma of the region's
-stored sRGB RGB channels (alpha ignored), 0–255 (the small
-sRGB-read region, §3b).
+stored (linear, premultiplied) RGB channels (alpha ignored — a
+transparent pixel is colorless), × 255 (the linear scale, §3b — no
+sRGB round-trip; the thresholds run on the same scale as the
+autocontrast histogram).
 *Gate:* on the sample backgrounds, headless: the `luma_at` matching
 the 709 mean.
 
@@ -465,5 +470,6 @@ question for engine outputs.
 
 ## 9. Next
 
-The phase ladder is settled (§7); the next working step is Phase 6c
-(the real `luma_at`: the 709 mean over a clipped region).
+The phase ladder is settled (§7); the next working step is Phase 6d
+(the real `fill`: the hex paint of a `Rectangle` or `Text` region —
+a `Rectangle` region composites in linear, a `Text` region in sRGB).

@@ -239,6 +239,30 @@ impl Image {
         }
     }
 
+    pub fn luma_at(&self, region: Rectangle) -> f32 {
+        let left = self.viewport.to_physical_signed(region.x);
+        let top = self.viewport.to_physical_signed(region.y);
+        let right = self.viewport.to_physical_signed(region.x + region.width);
+        let bottom = self.viewport.to_physical_signed(region.y + region.height);
+        let left = left.max(0).min(self.width as i32);
+        let top = top.max(0).min(self.height as i32);
+        let right = right.max(0).min(self.width as i32);
+        let bottom = bottom.max(0).min(self.height as i32);
+        if left >= right || top >= bottom {
+            return 0.0;
+        }
+
+        let (r, g, b) = (&self.buffer.r, &self.buffer.g, &self.buffer.b);
+        let mut luma = 0.0f32;
+        for y in top..bottom {
+            for x in left..right {
+                let i = (y * self.width as i32 + x) as usize;
+                luma += luma_linear(r[i], g[i], b[i]);
+            }
+        }
+        luma / ((right - left) * (bottom - top)) as f32 * 255.0
+    }
+
     pub fn write(&self) -> anywho::Result<()> {
         let rgba8 = self.to_rgba8();
         let target = Path::new("output.png");
@@ -407,7 +431,10 @@ impl UserData for Image {
         );
         methods.add_method(
             "luma_at",
-            |_lua, _this, _region: mlua::Value| -> Result<f64> { Ok(0.0) },
+            |_lua, this, region: AnyUserData| -> Result<f64> {
+                let region: Rectangle = *region.borrow::<Rectangle>()?;
+                Ok(this.luma_at(region) as f64)
+            },
         );
     }
 }
@@ -542,6 +569,120 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_luma_at_is_the_709_mean_of_the_stored_channels() {
+        let viewport = Viewport {
+            width: 4,
+            height: 4,
+            scale: 1.0,
+        };
+        let r: [f32; 16] = [
+            0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 0.0, 0.1, 0.2, 0.3, 0.4, 0.5,
+        ];
+        let image = Image {
+            buffer: Arc::new(Buffer {
+                r: r.to_vec(),
+                g: vec![0.5; 16],
+                b: vec![0.6; 16],
+                a: vec![1.0; 16],
+            }),
+            width: 4,
+            height: 4,
+            scale: 1.0,
+            viewport,
+        };
+
+        let luma = |r: f32| 0.2126 * r as f64 + 0.7152 * 0.5 + 0.0722 * 0.6;
+        let mean = |indices: &[usize]| {
+            indices.iter().map(|i| luma(r[*i])).sum::<f64>() / indices.len() as f64 * 255.0
+        };
+
+        let full: Vec<usize> = (0..16).collect();
+        assert!(
+            (image.luma_at(Rectangle::new(0.0, 0.0, 4.0, 4.0)) as f64 - mean(&full)).abs() < 1e-2
+        );
+
+        let top_left = vec![0, 1, 4, 5];
+        assert!(
+            (image.luma_at(Rectangle::new(0.0, 0.0, 2.0, 2.0)) as f64 - mean(&top_left)).abs()
+                < 1e-2
+        );
+
+        let right = vec![3, 7, 11, 15];
+        assert!(
+            (image.luma_at(Rectangle::new(3.0, 0.0, 1.0, 4.0)) as f64 - mean(&right)).abs() < 1e-2
+        );
+
+        let clipped = vec![0];
+        assert!(
+            (image.luma_at(Rectangle::new(-1.0, -1.0, 2.0, 2.0)) as f64 - mean(&clipped)).abs()
+                < 1e-2
+        );
+
+        assert_eq!(image.luma_at(Rectangle::new(10.0, 10.0, 2.0, 2.0)), 0.0);
+        assert_eq!(image.luma_at(Rectangle::new(0.0, 0.0, -2.0, 2.0)), 0.0);
+    }
+
+    #[test]
+    fn the_luma_at_reads_regions_in_logical_px() {
+        let viewport = Viewport {
+            width: 8,
+            height: 8,
+            scale: 0.5,
+        };
+        let image = square([0.5, 0.5, 0.5, 1.0], 4, viewport);
+
+        assert!((image.luma_at(Rectangle::new(0.0, 0.0, 8.0, 8.0)) - 127.5).abs() < 1e-2);
+        assert!((image.luma_at(Rectangle::new(0.0, 0.0, 4.0, 4.0)) - 127.5).abs() < 1e-2);
+        assert_eq!(image.luma_at(Rectangle::new(8.0, 8.0, 4.0, 4.0)), 0.0);
+    }
+
+    #[test]
+    fn the_luma_at_matches_the_709_mean_on_a_real_image() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("images/Lenna.png");
+        let image = load(
+            &path,
+            Viewport {
+                width: 512,
+                height: 512,
+                scale: 1.0,
+            },
+        )
+        .unwrap();
+
+        let luma = image.luma_at(Rectangle::new(10.0, 20.0, 100.0, 50.0));
+
+        let (r, g, b) = (&image.buffer.r, &image.buffer.g, &image.buffer.b);
+        let sum: f32 = (20..70)
+            .flat_map(|y| (10..110).map(move |x| y * 512 + x))
+            .map(|i| luma_linear(r[i], g[i], b[i]))
+            .sum();
+        let expected = sum / 5000.0 * 255.0;
+        assert!((luma - expected).abs() < 1e-2);
+    }
+
+    #[test]
+    fn the_luma_at_matches_the_independent_709_mean() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("personal/images/sky-night.png");
+        let image = load(
+            &path,
+            Viewport {
+                width: 1640,
+                height: 2048,
+                scale: 1.0,
+            },
+        )
+        .unwrap();
+
+        // Frozen oracles: an independent Python pass (PIL, the IEC 61966-2-1
+        // decode, the Rec. 709 mean) over personal/images/sky-night.png.
+        let corner = image.luma_at(Rectangle::new(10.0, 20.0, 300.0, 200.0));
+        assert!((corner - 2.7941046).abs() < 1e-2);
+
+        let full = image.luma_at(Rectangle::new(0.0, 0.0, 1640.0, 2048.0));
+        assert!((full - 11.452538).abs() < 1e-2);
     }
 
     fn synthetic_linear(pixels: &[[f32; 4]], viewport: Viewport) -> Image {

@@ -107,10 +107,6 @@ const LUMA_R: f64 = 0.2126;
 const LUMA_G: f64 = 0.7152;
 const LUMA_B: f64 = 0.0722;
 
-pub fn luma(pixel: [u8; 3]) -> f64 {
-    LUMA_R * pixel[0] as f64 + LUMA_G * pixel[1] as f64 + LUMA_B * pixel[2] as f64
-}
-
 pub fn luma_linear(r: f32, g: f32, b: f32) -> f32 {
     LUMA_R as f32 * r + LUMA_G as f32 * g + LUMA_B as f32 * b
 }
