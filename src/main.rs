@@ -1,4 +1,3 @@
-// The luma and blend consumers land with the compositing ops.
 #[allow(dead_code)]
 mod color;
 mod engine;
@@ -152,8 +151,6 @@ fn main() -> anywho::Result<()> {
 
     engine.run(width, height, scale, &arguments)
 }
-
-// --- helpers ---------------------------------------------------------------
 
 fn help(engine: Option<&Engine>) -> String {
     let mut help = String::from(

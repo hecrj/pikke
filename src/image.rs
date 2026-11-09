@@ -8,8 +8,6 @@ use mlua::{AnyUserData, Lua, Result, Table, UserData, UserDataFields, UserDataMe
 use crate::Viewport;
 use crate::color::{Color, Filter, crop, luma_linear, resize};
 
-/// The RGBA buffer: premultiplied f32 linear (0-1) planes, the pixel
-/// dims at `scale`; the API reports logical.
 #[derive(Clone, Debug)]
 pub struct Image {
     buffer: Arc<Buffer>,
@@ -27,13 +25,10 @@ struct Buffer {
     a: Vec<f32>,
 }
 
-/// How a resize target is met.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Mode {
-    /// Stretch to the target box itself.
     #[default]
     Stretch,
-    /// Center-crop the target.
     Cover,
 }
 
@@ -113,18 +108,14 @@ impl Image {
             Mode::Stretch => (target_w, target_h),
         };
 
-        // The center crop's halves (the box is ≥ the target: the cover
-        // box is built from the max of the per-axis ratios).
         let left = (box_w - target_w) / 2;
         let top = (box_h - target_h) / 2;
 
-        // A no-op resize still settles the buffer at the run scale.
         if (box_w, box_h) == (self.width, self.height) && left == 0 && top == 0 {
             self.scale = scale;
             return;
         }
 
-        // The first in-place write forks a shared buffer (CoW).
         let buffer = Arc::make_mut(&mut self.buffer);
         let resized = (box_w, box_h) != (self.width, self.height);
         if resized {
@@ -141,9 +132,6 @@ impl Image {
             buffer.a = crop(&buffer.a, box_w, left, top, target_w, target_h);
         }
 
-        // Alpha is a 0-1 ratio, not light: the resample's
-        // out-of-range ringing is meaningless there (the light
-        // channels keep it to the encode's clamp).
         if resized {
             for value in buffer.a.iter_mut() {
                 *value = value.clamp(0.0, 1.0);
@@ -155,15 +143,9 @@ impl Image {
         self.scale = scale;
     }
 
-    /// The tone-preserving full-range stretch of the histogram's luma
-    /// extent, run in linear light (the buffer's form) — the single
-    /// encode rounding stays at the boundary.
     pub fn autocontrast(&mut self) {
         let count = (self.width * self.height) as usize;
 
-        // The histogram's extent: the linear-light luma of the stored
-        // (premultiplied) channels; a transparent pixel reads as
-        // colorless black.
         let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
         for i in 0..count {
             let luma = luma_linear(self.buffer.r[i], self.buffer.g[i], self.buffer.b[i]);
@@ -171,18 +153,12 @@ impl Image {
             hi = hi.max(luma);
         }
 
-        // A degenerate extent (hi <= lo) leaves the buffer unchanged.
         if hi <= lo {
             return;
         }
 
-        // The first in-place write forks a shared buffer (CoW).
         let buffer = Arc::make_mut(&mut self.buffer);
 
-        // The tone-preserving ramp: the in-extent values stretch to
-        // the full range, the off-extent values keep their tone (no
-        // highlight or shadow clip). The alpha is untouched (not
-        // light).
         let scale = 1.0 / (hi - lo);
         let stretch = |value: f32| {
             if value < lo || value > hi {
@@ -198,8 +174,6 @@ impl Image {
         }
     }
 
-    /// The buffer as `output.png` (the working directory): the straight
-    /// RGBA8 sRGB form, the buffer's alpha as-is, written atomically.
     pub fn write(&self) -> anywho::Result<()> {
         let rgba8 = self.to_rgba8();
         let target = Path::new("output.png");
@@ -222,8 +196,6 @@ impl Image {
     }
 }
 
-/// A bitmap at its file's dims (logical): the straight RGBA8 sRGB
-/// boundary decoded and premultiplied into the buffer's form.
 fn load(path: &Path, viewport: Viewport) -> anywho::Result<Image> {
     let rgba = image::open(path)
         .map_err(|error| anywho!("failed to load {}: {error}", path.display()))?
@@ -236,7 +208,6 @@ fn load(path: &Path, viewport: Viewport) -> anywho::Result<Image> {
         Vec::with_capacity(count),
         Vec::with_capacity(count),
     );
-    // RGBA8: 4-byte pixels, so no remainder.
     for pixel in rgba.as_chunks::<4>().0 {
         let color = Color::from_rgba_u8([pixel[0], pixel[1], pixel[2], pixel[3]])
             .srgb_to_linear()
@@ -267,8 +238,6 @@ impl UserData for Image {
         methods.add_method("height", |_lua, this, _args: ()| -> Result<u32> {
             Ok(this.logical_height())
         });
-        // A single {w, h} pair: the convenience for `rectangle`'s
-        // `size` (§6).
         methods.add_method("size", |lua, this, _args: ()| -> Result<Table> {
             let size = lua.create_table()?;
             size.set(1, this.logical_width())?;
@@ -276,8 +245,6 @@ impl UserData for Image {
             Ok(size)
         });
         methods.add_method("clone", |_lua, this, _args: ()| -> Result<Image> {
-            // Cheap (shares the buffer's Arc); the pixel copy is deferred
-            // to the first in-place write (CoW).
             Ok(this.clone())
         });
         methods.add_method_mut("resize", |_lua, this, opts: Table| -> Result<()> {
@@ -286,7 +253,6 @@ impl UserData for Image {
             let filter: Option<String> = opts.get("filter")?;
             let mode: Option<String> = opts.get("mode")?;
 
-            // A one-dim target: the missing dim follows the image's aspect.
             let (width, height) = match (width, height) {
                 (Some(width), Some(height)) => (width, height),
                 (Some(width), None) => (
@@ -335,7 +301,6 @@ impl UserData for Image {
         methods.add_method_mut(
             "blend",
             |_lua, this, (_layer, _opts): (AnyUserData, Option<Table>)| -> Result<()> {
-                // A blend's receiver is the physical viewport (§3b).
                 let (width, height) = (this.physical_width(), this.physical_height());
                 let (physical_width, physical_height) =
                     (this.viewport.physical_width(), this.viewport.physical_height());
@@ -388,8 +353,6 @@ mod tests {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("images/Lenna.png");
         let file = std::fs::read(&path).unwrap();
 
-        // The PNG's IHDR: the width and height after the 8-byte
-        // signature and the chunk header.
         let file_width = u32::from_be_bytes([file[16], file[17], file[18], file[19]]);
         let file_height = u32::from_be_bytes([file[20], file[21], file[22], file[23]]);
 
@@ -435,27 +398,18 @@ mod tests {
 
         let mut fork = image.clone();
 
-        // Stretch: the caller resolves the aspect (200 logical wide
-        // at the file's 2048/1640: 250 tall) — 100×125 physical at
-        // run scale 0.5.
         image.resize(200.0, 250.0, Filter::Lanczos, Mode::Stretch);
         assert_eq!(
             (image.physical_width(), image.physical_height()),
             (100, 125)
         );
 
-        // The fork keeps the original: the resize forked it (CoW).
         assert_eq!((fork.physical_width(), fork.physical_height()), (512, 512));
         assert_eq!(fork.buffer.r[0], first_pixel);
 
-        // Cover: logical 400×100 → the 200×50 target out of the
-        // 200×250 box, cropped 100 from the top.
         fork.resize(400.0, 100.0, Filter::Cubic, Mode::Cover);
         assert_eq!((fork.physical_width(), fork.physical_height()), (200, 50));
 
-        // A no-op target (the file already at the physical target,
-        // here at run scale 2) only moves the buffer to the run's
-        // scale: the same pixels now read as half the logical size.
         let mut image = load(
             &path,
             Viewport {
@@ -474,7 +428,6 @@ mod tests {
         );
     }
 
-    /// A row image at the linear-light `pixels` (the buffer's form).
     fn synthetic_linear(pixels: &[[f32; 4]], viewport: Viewport) -> Image {
         let plane = |channel: usize| pixels.iter().map(|pixel| pixel[channel]).collect();
 
@@ -494,8 +447,6 @@ mod tests {
 
     #[test]
     fn the_autocontrast_is_full_range_and_tone_preserving() {
-        // Grays spanning the luma extent, and a pixel whose channels
-        // all sit outside the extent.
         let pixels = [
             [0.3, 0.3, 0.3, 1.0],
             [0.5, 0.5, 0.5, 1.0],
@@ -517,9 +468,6 @@ mod tests {
         let hi = luma_linear(0.7, 0.7, 0.7);
         let scale = 1.0 / (hi - lo);
 
-        // The op runs the tone-preserving ramp over the luma extent:
-        // the in-extent channels stretch, the off-extent ones keep
-        // their tone.
         for (i, pixel) in pixels.iter().enumerate() {
             for (value, stretched) in [
                 (pixel[0], image.buffer.r[i]),
@@ -535,11 +483,8 @@ mod tests {
             }
         }
 
-        // The full range: the extent's midpoint holds.
         assert!((image.buffer.r[1] - 0.5).abs() <= 1e-5);
 
-        // The off-extent channels keep their tone (no clip); the
-        // alpha is untouched.
         assert_eq!(image.buffer.r[3], 1.0);
         assert_eq!(image.buffer.g[3], 0.12);
         assert_eq!(image.buffer.b[3], 0.12);
@@ -560,7 +505,6 @@ mod tests {
         );
         image.autocontrast();
 
-        // A degenerate extent (one luma) leaves the buffer unchanged.
         for i in 0..3 {
             assert_eq!(image.buffer.r[i], 0.4);
             assert_eq!(image.buffer.g[i], 0.3);
@@ -595,14 +539,11 @@ mod tests {
             hi = hi.max(luma);
         }
 
-        // A real extent, not a degenerate one.
         assert!(hi > lo);
 
         image.autocontrast();
         let scale = 1.0 / (hi - lo);
 
-        // The op applies the ramp to the whole image: the in-extent
-        // channels stretch, the off-extent ones keep their tone.
         for i in 0..count {
             for (value, stretched) in [
                 (r[i], image.buffer.r[i]),

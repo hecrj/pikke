@@ -7,13 +7,11 @@ use mlua::{AnyUserData, Function, Lua, Table};
 
 use crate::{Image, Viewport, font, image, rectangle, stream, text};
 
-/// The compositing engine: the Lua state and the loaded design script.
 pub struct Engine {
     script: PathBuf,
     lua: Lua,
     render: Function,
     arguments: Vec<String>,
-    /// The script's environment: the op table's home (§6).
     env: Table,
 }
 
@@ -25,8 +23,6 @@ impl Engine {
 
         let lua = Lua::new();
 
-        // A dedicated environment: the script's globals live here,
-        // separate from the engine's.
         let env = lua.create_table()?;
         env.set("_G", env.clone())?;
 
@@ -63,9 +59,6 @@ impl Engine {
         &self.arguments
     }
 
-    /// Call the entry with the bound parameters as a single table
-    /// keyed by name (`None` binds `nil`), on the viewport of logical
-    /// `width`/`height` at the run's `scale`.
     pub fn run(
         &self,
         width: u32,
@@ -84,7 +77,6 @@ impl Engine {
             .map(|dir| dir.to_path_buf())
             .unwrap_or_default();
 
-        // The op table (§6): each global is bound by its type's module.
         image::install(&self.lua, &self.env, &script_dir, viewport)?;
         font::install(&self.lua, &self.env)?;
         rectangle::install(&self.lua, &self.env)?;
@@ -102,7 +94,6 @@ impl Engine {
                 .create_function(move |_lua, _args: ()| -> mlua::Result<u32> { Ok(height) })?,
         )?;
 
-        // The physical viewport: the logical → physical transform (§5).
         self.env.set(
             "physical_width",
             self.lua
@@ -124,7 +115,6 @@ impl Engine {
             "yield",
             self.lua
                 .create_function(move |_lua, frame: AnyUserData| -> mlua::Result<()> {
-                    // A frame is the physical viewport (§3b).
                     let frame = frame.borrow::<Image>()?;
                     let (frame_width, frame_height) =
                         (frame.physical_width(), frame.physical_height());
@@ -151,8 +141,6 @@ impl Engine {
         }
         self.render.call::<()>(args)?;
 
-        // The frame sequence becomes the output: one frame → the PNG
-        // (the MP4 path starts at frame 2, §5).
         let frames = frames.borrow();
         match frames.len() {
             1 => {
@@ -170,7 +158,6 @@ impl Engine {
     }
 }
 
-/// The entry's parameter declaration (§3b).
 fn arguments(script: &Path, env: &Table) -> anywho::Result<Vec<String>> {
     let arguments: Table = env
         .get("arguments")

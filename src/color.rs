@@ -1,4 +1,3 @@
-/// A 0-1 RGBA color (straight alpha): linear light or sRGB, by context.
 #[derive(Clone, Copy, Debug)]
 pub struct Color {
     pub r: f32,
@@ -8,7 +7,6 @@ pub struct Color {
 }
 
 impl Color {
-    /// A stored sRGB pixel (0-255) as a 0-1 sRGB color.
     pub fn from_rgba_u8(pixel: [u8; 4]) -> Self {
         Self {
             r: pixel[0] as f32 / 255.0,
@@ -18,8 +16,6 @@ impl Color {
         }
     }
 
-    /// This color in linear light (the IEC 61966-2-1 decode of the
-    /// channels); the alpha is untouched.
     pub fn srgb_to_linear(self) -> Self {
         Self {
             r: srgb_to_linear(self.r),
@@ -29,8 +25,6 @@ impl Color {
         }
     }
 
-    /// This color in sRGB (the IEC 61966-2-1 encode of the channels);
-    /// the alpha is untouched.
     pub fn linear_to_srgb(self) -> Self {
         Self {
             r: linear_to_srgb(self.r),
@@ -40,8 +34,6 @@ impl Color {
         }
     }
 
-    /// The 8-bit stored pixel: each channel through the single encode
-    /// rounding.
     pub fn to_rgba_u8(self) -> [u8; 4] {
         [
             encode_u8(self.r),
@@ -51,7 +43,6 @@ impl Color {
         ]
     }
 
-    /// The buffer's premultiplied form.
     pub fn premultiply(self) -> Self {
         Self {
             r: self.r * self.a,
@@ -61,8 +52,6 @@ impl Color {
         }
     }
 
-    /// The straight form from the buffer's premultiplied one. A fully
-    /// transparent pixel's color is unrecoverable and reads as 0.
     pub fn demultiply(self) -> Self {
         if self.a == 0.0 {
             return Self {
@@ -81,9 +70,6 @@ impl Color {
         }
     }
 
-    /// Porter-Duff 'over' in the buffer's premultiplied form (the
-    /// caller's domain: linear light or sRGB): no division, and a 0
-    /// or 1 alpha on either side falls out of the formula exactly.
     pub fn over(self, layer: Color) -> Color {
         let retain = 1.0 - layer.a;
 
@@ -96,7 +82,6 @@ impl Color {
     }
 }
 
-/// 0-1 sRGB (stored) -> 0-1 linear light, the IEC 61966-2-1 curve.
 pub fn srgb_to_linear(stored: f32) -> f32 {
     if stored <= 0.04045 {
         stored / 12.92
@@ -105,9 +90,6 @@ pub fn srgb_to_linear(stored: f32) -> f32 {
     }
 }
 
-/// 0-1 linear light -> 0-1 sRGB (stored), the IEC 61966-2-1 curve;
-/// out-of-range linear clamps to 0-1 here, the encode path's only
-/// clamp.
 pub fn linear_to_srgb(linear: f32) -> f32 {
     let linear = linear.clamp(0.0, 1.0);
     if linear <= 0.0031308 {
@@ -117,28 +99,22 @@ pub fn linear_to_srgb(linear: f32) -> f32 {
     }
 }
 
-/// The single encode rounding: a 0-1 stored value to 8 bits (nearest
-/// 1/255, ties away from zero).
 pub fn encode_u8(stored: f32) -> u8 {
     (stored * 255.0).round() as u8
 }
 
-// The Rec. 709 luma weights (the sum is 1).
 const LUMA_R: f64 = 0.2126;
 const LUMA_G: f64 = 0.7152;
 const LUMA_B: f64 = 0.0722;
 
-/// The Rec. 709 luma of a stored sRGB pixel (0-255 channels), 0-255.
 pub fn luma(pixel: [u8; 3]) -> f64 {
     LUMA_R * pixel[0] as f64 + LUMA_G * pixel[1] as f64 + LUMA_B * pixel[2] as f64
 }
 
-/// The Rec. 709 luma of a linear-light pixel (0-1 channels), 0-1.
 pub fn luma_linear(r: f32, g: f32, b: f32) -> f32 {
     LUMA_R as f32 * r + LUMA_G as f32 * g + LUMA_B as f32 * b
 }
 
-/// The resize's resampling kernel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Filter {
     #[default]
@@ -146,8 +122,6 @@ pub enum Filter {
     Lanczos,
 }
 
-/// The buffer's form (the filter over premultiplied light is
-/// alpha-blind).
 pub fn resize(
     filter: Filter,
     src: &[f32],
@@ -162,9 +136,6 @@ pub fn resize(
     }
 }
 
-/// The window arithmetic (the support-scaled kernel
-/// window, the weights renormalized per output sample); an unchanged
-/// axis copies (the unit-scale kernel would blur it).
 fn resample(
     kernel: impl Fn(f64) -> f64,
     support: f64,
@@ -174,10 +145,6 @@ fn resample(
     dst_w: u32,
     dst_h: u32,
 ) -> Vec<f32> {
-    /// One separable pass: `src_len` samples, `src_stride` apart, in
-    /// `src`, scaled to `dst_len` (`dst_stride` apart in `out`), the
-    /// weights normalized per output sample; out-of-range taps are
-    /// absent (the weights renormalize over the window that remains).
     fn pass(
         src: &[f32],
         src_stride: usize,
@@ -188,18 +155,12 @@ fn resample(
         kernel: impl Fn(f64) -> f64,
         support: f64,
     ) {
-        // Source samples per target sample; the filter scale
-        // is the ratio on a downscale and 1 on an upscale (the window
-        // stays at the kernel's width, the kernel argument unscaled).
         let scale = src_len as f64 / dst_len as f64;
         let filterscale = scale.max(1.0);
         let support = support * filterscale;
 
         for i in 0..dst_len {
-            // The kernel's zero: the target sample's center in source
-            // samples (the pixel-center convention, tap j at j + 0.5).
             let center = (i as f64 + 0.5) * scale;
-            // The tap bounds: half-up, clamped to the source.
             let start = (center - support + 0.5).trunc().clamp(0.0, src_len as f64) as usize;
             let end = (center + support + 0.5).trunc().clamp(0.0, src_len as f64) as usize;
 
@@ -260,11 +221,6 @@ fn resample(
     out
 }
 
-/// GIMP's resize as-is (GEGL's cubic sampler): the tap's fixed
-/// 4-window, a downsample of `n >= 2` averaged at the `n` sub-block
-/// centers (capped at 5), the out-of-range taps reading the abyss
-/// (zero; the 4-window's weights sum to one — no renormalization).
-/// An unchanged axis runs the tap (GIMP's; not a copy).
 fn resample_cubic(src: &[f32], src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> Vec<f32> {
     let (sw, sh, dw, dh) = (
         src_w as usize,
@@ -293,10 +249,6 @@ fn resample_cubic(src: &[f32], src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -
     out
 }
 
-/// One separable pass in GIMP's window arithmetic: `src_len` samples
-/// (`src_stride` apart) scaled to `dst_len` (`dst_stride` apart in
-/// `out`): the downsample averages the tap at the sub-block centers,
-/// the out-of-range taps read the abyss.
 fn pass_cubic(
     src: &[f32],
     src_stride: usize,
@@ -305,19 +257,14 @@ fn pass_cubic(
     src_len: usize,
     dst_len: usize,
 ) {
-    // The sub-blocks: the downscale factor, capped at 5 (GIMP's).
     let scale = src_len as f64 / dst_len as f64;
     let n = (scale as usize).clamp(1, 5);
     let u_dx = scale / n as f64;
 
     for i in 0..dst_len {
-        // The sub-block centers: the target sample's source block,
-        // the pixel-center convention (tap j at j + 0.5).
         let x0 = (i as f64 + 0.5) * scale - (scale - u_dx) / 2.0;
         let mut acc = 0.0f32;
         for j in 0..n {
-            // The tap's zero: the sub-block center on the source
-            // pixel grid, `ix` the top-left tap's pixel.
             let shifted = x0 + j as f64 * u_dx - 0.5;
             let ix = shifted.floor() as i64;
             let frac = shifted - ix as f64;
@@ -332,7 +279,6 @@ fn pass_cubic(
     }
 }
 
-/// The Lanczos-3 kernel: the 3-lobed sinc, zero at the window's edge.
 fn lanczos3(x: f64) -> f64 {
     if x.abs() >= 3.0 {
         return 0.0;
@@ -345,8 +291,6 @@ fn lanczos3(x: f64) -> f64 {
     (pi_x.sin() / pi_x) * (pi_x3.sin() / pi_x3)
 }
 
-/// GIMP's resize kernel (GEGL's cubic sampler: the BC-spline
-/// b = 1/2, c = 1/4), zero outside ±2.
 fn cubic(x: f64) -> f64 {
     let x = if x < 0.0 { -x } else { x };
     if x < 1.0 {
@@ -358,8 +302,6 @@ fn cubic(x: f64) -> f64 {
     }
 }
 
-/// The `out_w`×`out_h` region `left`/`top` into a `src_w`-wide
-/// row-major plane.
 pub fn crop(src: &[f32], src_w: u32, left: u32, top: u32, out_w: u32, out_h: u32) -> Vec<f32> {
     let (sw, ow, oh) = (src_w as usize, out_w as usize, out_h as usize);
     let (left, top) = (left as usize, top as usize);
@@ -378,8 +320,6 @@ mod kernels {
     #[test]
     fn the_kernels_match_their_defining_values() {
         assert_eq!(lanczos3(0.0), 1.0);
-        // GIMP's cubic's exact grid values (a polynomial, the sinc is
-        // not) and its lobe (the fringe at GIMP's level).
         assert_eq!(cubic(0.0), 5.0 / 6.0);
         assert_eq!(cubic(1.0), 1.0 / 12.0);
         assert_eq!(cubic(1.5), -1.0 / 48.0);
@@ -387,9 +327,6 @@ mod kernels {
             assert_eq!(cubic(x), 0.0);
             assert_eq!(cubic(-x), 0.0);
         }
-        // The partition of unity over the integer shifts: the 4-tap's
-        // weights sum to one (why GIMP's arithmetic renormalizes
-        // nothing).
         for i in 0..20 {
             let x = i as f64 / 20.0;
             let sum: f64 = (-3..=3).map(|d| cubic(x - d as f64)).sum();

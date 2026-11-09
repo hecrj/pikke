@@ -1,4 +1,3 @@
-/// The viewport: the logical dims at the run's scale.
 #[derive(Clone, Copy, Debug)]
 pub struct Viewport {
     pub width: u32,
@@ -7,7 +6,6 @@ pub struct Viewport {
 }
 
 impl Viewport {
-    /// Logical → physical; the rounding ties away from zero.
     pub fn physical(&self, logical: f32) -> u32 {
         (logical * self.scale).round() as u32
     }
@@ -25,8 +23,6 @@ impl Viewport {
 mod tests {
     use super::Viewport;
 
-    // The example run's scale (0.5) on the canvas and the design's
-    // logical targets.
     #[test]
     fn the_transform_is_exact() {
         let viewport = Viewport {

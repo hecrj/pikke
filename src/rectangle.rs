@@ -1,6 +1,5 @@
 use mlua::{Lua, Result, Table, UserData, UserDataFields, UserDataMethods, Value};
 
-/// A rectangle in logical px.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Rectangle {
     pub x: f32,
@@ -19,8 +18,6 @@ impl Rectangle {
         }
     }
 
-    /// The rect grown by `n` logical px on all sides (a negative
-    /// `n` shrinks).
     pub fn padded(self, n: f32) -> Rectangle {
         Rectangle::new(
             self.x - n,
@@ -51,10 +48,6 @@ pub fn install(lua: &Lua, env: &Table) -> anywho::Result<()> {
     env.set(
         "rectangle",
         lua.create_function(|_lua, opts: Table| -> Result<Rectangle> {
-            // The `rectangle({x, y, size})` op: `x`/`y` the top-left
-            // in logical px (defaulting to the origin), `size` a
-            // scalar (`w = h`) or the `{w, h}` pair (`img:size()`'s
-            // form).
             let x: Option<f32> = opts.get("x")?;
             let y: Option<f32> = opts.get("y")?;
             let size: Option<Value> = opts.get("size")?;
@@ -70,8 +63,6 @@ pub fn install(lua: &Lua, env: &Table) -> anywho::Result<()> {
                     let size = size as f32;
                     (size, size)
                 }
-                // Lua 5.4 keeps integers and floats apart; a whole
-                // size is an integer.
                 Value::Integer(size) => {
                     let size = size as f32;
                     (size, size)
@@ -118,13 +109,11 @@ mod tests {
         install(&lua, &env).unwrap();
         let rectangle: Function = env.get("rectangle").unwrap();
 
-        // The op's result is a Rectangle userdata.
         let call_rect = |opts: Table| -> Rectangle {
             let userdata: AnyUserData = rectangle.call(opts).unwrap();
             *userdata.borrow::<Rectangle>().unwrap()
         };
 
-        // A scalar size: w = h; the absent x/y land at the origin.
         let opts = lua.create_table().unwrap();
         opts.set("size", 100.5).unwrap();
         let rect = call_rect(opts);
@@ -133,8 +122,6 @@ mod tests {
             (0.0, 0.0, 100.5, 100.5)
         );
 
-        // An integer scalar (Lua 5.4's integer value; the form the
-        // script's `size()` feeds).
         let opts = lua.create_table().unwrap();
         opts.set("size", 100).unwrap();
         let rect = call_rect(opts);
@@ -143,8 +130,6 @@ mod tests {
             (0.0, 0.0, 100.0, 100.0)
         );
 
-        // The {w, h} pair (width first, then height); the fractional
-        // x/y keep their value (real px).
         let opts = lua.create_table().unwrap();
         opts.set("x", 10.5).unwrap();
         opts.set("y", -10.5).unwrap();
@@ -158,8 +143,6 @@ mod tests {
             (10.5, -10.5, 100.5, 50.5)
         );
 
-        // A missing size is an error, as is a pair missing an
-        // element.
         let opts = lua.create_table().unwrap();
         assert!(rectangle.call::<AnyUserData>(opts).is_err());
         let size = lua.create_table().unwrap();
@@ -179,7 +162,6 @@ mod tests {
             (0.0, 10.0, 120.0, 70.0)
         );
 
-        // A fractional amount stays real; a negative shrinks.
         let padded = rect.padded(2.5);
         assert_eq!(
             (padded.x, padded.y, padded.width, padded.height),

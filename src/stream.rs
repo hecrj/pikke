@@ -6,7 +6,6 @@ use mlua::{
 
 use crate::{Image, Viewport};
 
-/// The `spawn`'d producer; the frame's (the viewport's physical) dims.
 pub struct Stream {
     viewport: Viewport,
     done: RefCell<bool>,
@@ -18,9 +17,6 @@ impl UserData for Stream {
     }
 
     fn add_methods<M: UserDataMethods<Stream>>(methods: &mut M) {
-        // `for frame in stream` calls the stream as the per-iteration
-        // iterator (the nil state/control args): the first call yields
-        // the frame, the next nil.
         methods.add_meta_method(
             MetaMethod::Call,
             |lua, this: &Stream, _args: ()| -> Result<Value> {

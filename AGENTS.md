@@ -33,19 +33,9 @@ no content knowledge.
   `crate` (last). Shared types are importable from the crate root
   (`pub use`).
 
-## Comments and doc comments
+## Comments
 
-Cover only what the code does not say: invariants, protocol
-semantics, units, gotchas.
-
-- Never values: numbers, named lists, restated defaults.
-- Never restated code: step-by-step narration, per-parameter docs,
-  restated names.
-- Write each fact once, at its defining site; reference it
-  elsewhere.
-- No history: do not justify a choice by negating a previous or
-  rejected approach.
-- Keep them as concise as possible: only the important ones.
+No comments allowed, unless explicitly requested during review.
 
 ## Hygiene
 
