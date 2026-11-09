@@ -6,16 +6,20 @@ pub struct Viewport {
 }
 
 impl Viewport {
-    pub fn physical(&self, logical: f32) -> u32 {
+    pub fn to_physical(&self, logical: f32) -> u32 {
         (logical * self.scale).round() as u32
     }
 
+    pub fn to_physical_signed(&self, logical: f32) -> i32 {
+        (logical * self.scale).round() as i32
+    }
+
     pub fn physical_width(&self) -> u32 {
-        self.physical(self.width as f32)
+        self.to_physical(self.width as f32)
     }
 
     pub fn physical_height(&self) -> u32 {
-        self.physical(self.height as f32)
+        self.to_physical(self.height as f32)
     }
 }
 
@@ -34,8 +38,10 @@ mod tests {
             (viewport.physical_width(), viewport.physical_height()),
             (820, 1024)
         );
-        assert_eq!(viewport.physical(200.0), 100);
-        assert_eq!(viewport.physical(20.0), 10);
-        assert_eq!(viewport.physical(150.0), 75);
+        assert_eq!(viewport.to_physical(200.0), 100);
+        assert_eq!(viewport.to_physical(20.0), 10);
+        assert_eq!(viewport.to_physical(150.0), 75);
+        assert_eq!(viewport.to_physical_signed(-20.0), -10);
+        assert_eq!(viewport.to_physical_signed(-21.0), -11);
     }
 }

@@ -5,8 +5,8 @@ use anywho::anywho;
 use image::{ColorType, ImageFormat};
 use mlua::{AnyUserData, Lua, Result, Table, UserData, UserDataFields, UserDataMethods};
 
-use crate::Viewport;
-use crate::color::{Color, Filter, crop, luma_linear, resize};
+use crate::color::{Color, Filter, Space, crop, luma_linear, resize};
+use crate::{Rectangle, Viewport};
 
 #[derive(Clone, Debug)]
 pub struct Image {
@@ -86,8 +86,8 @@ impl Image {
     pub fn resize(&mut self, new_width: f32, new_height: f32, filter: Filter, mode: Mode) {
         let scale = self.viewport.scale;
         let (target_w, target_h) = (
-            self.viewport.physical(new_width),
-            self.viewport.physical(new_height),
+            self.viewport.to_physical(new_width),
+            self.viewport.to_physical(new_height),
         );
         assert!(
             target_w != 0 && target_h != 0,
@@ -171,6 +171,71 @@ impl Image {
             buffer.r[i] = stretch(buffer.r[i]);
             buffer.g[i] = stretch(buffer.g[i]);
             buffer.b[i] = stretch(buffer.b[i]);
+        }
+    }
+
+    pub fn blend(&mut self, other: &Image, at: Rectangle, space: Space) {
+        let other = if other.scale != self.scale {
+            let mut other = other.clone();
+            other.resize(
+                other.logical_width() as f32,
+                other.logical_height() as f32,
+                Filter::default(),
+                Mode::Stretch,
+            );
+            other
+        } else {
+            other.clone()
+        };
+
+        let at_x = self.viewport.to_physical_signed(at.x);
+        let at_y = self.viewport.to_physical_signed(at.y);
+        let left = at_x.max(0);
+        let top = at_y.max(0);
+        let right = (at_x + other.width as i32).min(self.width as i32);
+        let bottom = (at_y + other.height as i32).min(self.height as i32);
+        if left >= right || top >= bottom {
+            return;
+        }
+
+        let buffer = Arc::make_mut(&mut self.buffer);
+        let (base_r, base_g, base_b, base_a) =
+            (&mut buffer.r, &mut buffer.g, &mut buffer.b, &mut buffer.a);
+        let (layer_r, layer_g, layer_b, layer_a) = (
+            &other.buffer.r,
+            &other.buffer.g,
+            &other.buffer.b,
+            &other.buffer.a,
+        );
+
+        for y in top..bottom {
+            for x in left..right {
+                let i = (y * self.width as i32 + x) as usize;
+                let j = ((y - at_y) * other.width as i32 + (x - at_x)) as usize;
+                let base = Color {
+                    r: base_r[i],
+                    g: base_g[i],
+                    b: base_b[i],
+                    a: base_a[i],
+                };
+                let layer = Color {
+                    r: layer_r[j],
+                    g: layer_g[j],
+                    b: layer_b[j],
+                    a: layer_a[j],
+                };
+                let blended = match space {
+                    Space::Linear => base.over(layer),
+                    Space::Srgb => base
+                        .linear_to_srgb()
+                        .over(layer.linear_to_srgb())
+                        .srgb_to_linear(),
+                };
+                base_r[i] = blended.r;
+                base_g[i] = blended.g;
+                base_b[i] = blended.b;
+                base_a[i] = blended.a;
+            }
         }
     }
 
@@ -300,7 +365,12 @@ impl UserData for Image {
         });
         methods.add_method_mut(
             "blend",
-            |_lua, this, (_layer, _opts): (AnyUserData, Option<Table>)| -> Result<()> {
+            |lua, this, (other, opts): (AnyUserData, Option<Table>)| -> Result<()> {
+                let opts = match opts {
+                    Some(opts) => opts,
+                    None => lua.create_table()?,
+                };
+
                 let (width, height) = (this.physical_width(), this.physical_height());
                 let (physical_width, physical_height) =
                     (this.viewport.physical_width(), this.viewport.physical_height());
@@ -309,6 +379,25 @@ impl UserData for Image {
                         "blend: the receiver is {width}×{height}, the viewport is {physical_width}×{physical_height}"
                     )));
                 }
+
+                let other = other.borrow::<Image>()?;
+                let at: Option<AnyUserData> = opts.get("at")?;
+                let at = match at {
+                    Some(at) => *at.borrow::<Rectangle>()?,
+                    None => Rectangle::default(),
+                };
+                let color_space: Option<String> = opts.get("color_space")?;
+                let space = match color_space.as_deref() {
+                    None | Some("linear") => Space::Linear,
+                    Some("srgb") => Space::Srgb,
+                    Some(other) => {
+                        return Err(mlua::Error::RuntimeError(format!(
+                            "blend: unknown color_space: {other}"
+                        )))
+                    }
+                };
+
+                this.blend(&other, at, space);
                 Ok(())
             },
         );
@@ -342,11 +431,12 @@ pub fn install(
 
 #[cfg(test)]
 mod tests {
-    use super::{Buffer, Image, load};
-    use crate::Viewport;
-    use crate::color::luma_linear;
     use std::path::Path;
     use std::sync::Arc;
+
+    use super::{Buffer, Filter, Image, Mode, load};
+    use crate::color::{Color, Space, luma_linear};
+    use crate::{Rectangle, Viewport};
 
     #[test]
     fn the_base_background_loads_at_its_file_dims() {
@@ -382,8 +472,6 @@ mod tests {
 
     #[test]
     fn resize_lands_on_its_targets_and_forks() {
-        use super::{Filter, Mode};
-
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("images/Lenna.png");
         let mut image = load(
             &path,
@@ -440,6 +528,22 @@ mod tests {
             }),
             width: pixels.len() as u32,
             height: 1,
+            scale: 1.0,
+            viewport,
+        }
+    }
+
+    fn square(color: [f32; 4], size: u32, viewport: Viewport) -> Image {
+        let count = (size * size) as usize;
+        Image {
+            buffer: Arc::new(Buffer {
+                r: vec![color[0]; count],
+                g: vec![color[1]; count],
+                b: vec![color[2]; count],
+                a: vec![color[3]; count],
+            }),
+            width: size,
+            height: size,
             scale: 1.0,
             viewport,
         }
@@ -558,5 +662,182 @@ mod tests {
                 assert!((expected - stretched).abs() <= 1e-6, "pixel {i}");
             }
         }
+    }
+
+    #[test]
+    fn the_blend_is_byte_identical_where_the_layer_is_opaque() {
+        let lenna = Path::new(env!("CARGO_MANIFEST_DIR")).join("images/Lenna.png");
+        let sky = Path::new(env!("CARGO_MANIFEST_DIR")).join("personal/images/sky-night.png");
+        let viewport = Viewport {
+            width: 512,
+            height: 512,
+            scale: 1.0,
+        };
+        let mut base = load(&sky, viewport).unwrap();
+        let before = base.to_rgba8();
+        let layer = load(&lenna, viewport).unwrap();
+        let (base_width, base_height) = (base.physical_width(), base.physical_height());
+        let (layer_width, layer_height) = (layer.physical_width(), layer.physical_height());
+
+        base.blend(&layer, Rectangle::default(), Space::Linear);
+
+        let after = base.to_rgba8();
+        let layer = layer.to_rgba8();
+        for y in 0..base_height {
+            for x in 0..base_width {
+                let pixel = (y * base_width + x) as usize * 4;
+                if x < layer_width && y < layer_height {
+                    let overlapped = (y * layer_width + x) as usize * 4;
+                    assert_eq!(&after[pixel..pixel + 4], &layer[overlapped..overlapped + 4]);
+                } else {
+                    assert_eq!(&after[pixel..pixel + 4], &before[pixel..pixel + 4]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_blend_matches_the_pinned_over_on_real_data() {
+        let lenna = Path::new(env!("CARGO_MANIFEST_DIR")).join("images/Lenna.png");
+        let mask =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("personal/images/Card_Mask_Standard.png");
+        let viewport = Viewport {
+            width: 512,
+            height: 512,
+            scale: 1.0,
+        };
+        let mut base = load(&lenna, viewport).unwrap();
+        let layer = load(&mask, viewport).unwrap();
+        let base_width = base.physical_width();
+        let layer_width = layer.physical_width();
+
+        let (base_r, base_g, base_b, base_a) = (
+            base.buffer.r.clone(),
+            base.buffer.g.clone(),
+            base.buffer.b.clone(),
+            base.buffer.a.clone(),
+        );
+
+        base.blend(&layer, Rectangle::default(), Space::Linear);
+
+        let actual = base.to_rgba8();
+        for y in 0..base.height {
+            for x in 0..base.width {
+                let i = (y * base_width + x) as usize;
+                let j = (y * layer_width + x) as usize;
+                let expected = Color {
+                    r: base_r[i],
+                    g: base_g[i],
+                    b: base_b[i],
+                    a: base_a[i],
+                }
+                .over(Color {
+                    r: layer.buffer.r[j],
+                    g: layer.buffer.g[j],
+                    b: layer.buffer.b[j],
+                    a: layer.buffer.a[j],
+                })
+                .demultiply()
+                .linear_to_srgb()
+                .to_rgba_u8();
+                assert_eq!(&actual[i * 4..i * 4 + 4], &expected[..]);
+            }
+        }
+    }
+
+    #[test]
+    fn the_blend_offset_and_clip_are_exact() {
+        let viewport = Viewport {
+            width: 4,
+            height: 4,
+            scale: 1.0,
+        };
+        let black = square([0.0, 0.0, 0.0, 1.0], 4, viewport);
+        let white = square([1.0, 1.0, 1.0, 1.0], 2, viewport);
+
+        let mut base = black.clone();
+        base.blend(&white, Rectangle::new(-1.0, -1.0, 0.0, 0.0), Space::Linear);
+        let rgba = base.to_rgba8();
+        assert_eq!(&rgba[0..4], &[255, 255, 255, 255]);
+        for i in 1..16 {
+            assert_eq!(&rgba[i * 4..i * 4 + 4], &[0, 0, 0, 255]);
+        }
+
+        let mut base = black.clone();
+        base.blend(&white, Rectangle::new(3.0, 3.0, 0.0, 0.0), Space::Linear);
+        let rgba = base.to_rgba8();
+        for i in 0..15 {
+            assert_eq!(&rgba[i * 4..i * 4 + 4], &[0, 0, 0, 255]);
+        }
+        assert_eq!(&rgba[60..64], &[255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn the_blend_color_spaces_diverge() {
+        let viewport = Viewport {
+            width: 2,
+            height: 1,
+            scale: 1.0,
+        };
+        let base = synthetic_linear(&[[0.5, 0.5, 0.5, 1.0]; 2], viewport);
+        let layer = synthetic_linear(&[[0.5, 0.5, 0.5, 0.5]; 2], viewport);
+
+        let mut linear = base.clone();
+        linear.blend(&layer, Rectangle::default(), Space::Linear);
+        let mut srgb = base.clone();
+        srgb.blend(&layer, Rectangle::default(), Space::Srgb);
+
+        for i in 0..2 {
+            let linear_expected = Color {
+                r: 0.5,
+                g: 0.5,
+                b: 0.5,
+                a: 1.0,
+            }
+            .over(Color {
+                r: 0.5,
+                g: 0.5,
+                b: 0.5,
+                a: 0.5,
+            });
+            let srgb_expected = Color {
+                r: 0.5,
+                g: 0.5,
+                b: 0.5,
+                a: 1.0,
+            }
+            .linear_to_srgb()
+            .over(
+                Color {
+                    r: 0.5,
+                    g: 0.5,
+                    b: 0.5,
+                    a: 0.5,
+                }
+                .linear_to_srgb(),
+            )
+            .srgb_to_linear();
+            assert!((linear.buffer.r[i] - linear_expected.r).abs() <= 1e-6);
+            assert!((srgb.buffer.r[i] - srgb_expected.r).abs() <= 1e-6);
+            assert!((linear_expected.r - srgb_expected.r).abs() > 0.01);
+        }
+    }
+
+    #[test]
+    fn the_blend_resamples_the_file_scale_layer() {
+        let lenna = Path::new(env!("CARGO_MANIFEST_DIR")).join("images/Lenna.png");
+        let viewport = Viewport {
+            width: 256,
+            height: 256,
+            scale: 0.5,
+        };
+        let mut base = Image::transparent(256, 256, viewport);
+        let layer = load(&lenna, viewport).unwrap();
+
+        base.blend(&layer, Rectangle::default(), Space::Linear);
+
+        let mut expected = layer.clone();
+        expected.resize(512.0, 512.0, Filter::default(), Mode::Stretch);
+        assert_eq!(base.to_rgba8(), expected.to_rgba8());
     }
 }

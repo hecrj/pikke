@@ -358,10 +358,12 @@ single `{w, h}` pair it is the convenience for.
 preserved, `padded` growing all sides by `n`.
 
 **Phase 6b — `blend`.** The real `blend`: the Porter-Duff `over`
-(pinned; linear or sRGB by `color_space`, default linear), `other`'s
-top-left at `at` (a `Rectangle`, default `(0, 0)`), clipped to the
-canvas; a layer still at its file scale resamples to the run scale
-here (the composite the one-resample's second trigger, §8).
+(pinned; linear on the buffer, or sRGB by decoding both sides,
+`over`'ing, and re-encoding), `other`'s top-left at `at` (a
+`Rectangle`, default `(0, 0)`, the signed physical transform for the
+off-canvas halves), clipped to the canvas; a layer still at its file
+scale resamples to the run scale here, to its logical dims (the
+composite the one-resample's second trigger, §8).
 *Gate:* headless, on real pairs: the `over` exact at 8-bit (the
 pinned math — byte-identical where an alpha is 0 or 255), the `at`
 offset and the canvas clip exact.
@@ -461,6 +463,5 @@ question for engine outputs.
 
 ## 9. Next
 
-The phase ladder is settled (§7); the next working step is Phase 6a
-(the real `Rectangle`: the constructor, `padded`, the real-px
-geometry).
+The phase ladder is settled (§7); the next working step is Phase 6c
+(the real `luma_at`: the 709 mean over a clipped region).

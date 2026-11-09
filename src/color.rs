@@ -122,6 +122,13 @@ pub enum Filter {
     Lanczos,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Space {
+    #[default]
+    Linear,
+    Srgb,
+}
+
 pub fn resize(
     filter: Filter,
     src: &[f32],
