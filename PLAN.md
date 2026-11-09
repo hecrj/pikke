@@ -348,12 +348,37 @@ buffer's single encode rounding stays at the boundary.
 *Gate:* on the sample backgrounds, headless: the stretch is
 full-range and tone-preserving (no highlight/shadow clip).
 
-**Phase 6 — compositing: `blend`, `fill`, `luma_at`, the
-Rectangle.** The real blend (over, `color_space`, `at` + the canvas
-clip), fill (the space by the region's kind), luma_at (the region
-mean), and `rectangle.rs` (the Rectangle + `padded`).
-*Gate:* `blend` and `fill` exact at 8-bit on real pairs (pinned
-math); `luma_at` matching the 709 mean on the sample backgrounds.
+**Phase 6a — `rectangle`.** The real `Rectangle`: the
+`rectangle({x, y, size})` constructor (top-left, real px; `size` a
+scalar or the `{w, h}` pair) and `padded(n)`; the geometry is real
+px (f32) — the integer rounding (ties away from zero, §3b) is the
+consumers' logical → physical transform. `img:size()` returns the
+single `{w, h}` pair it is the convenience for.
+*Gate:* the geometry exact in real px: the positions and sizes
+preserved, `padded` growing all sides by `n`.
+
+**Phase 6b — `blend`.** The real `blend`: the Porter-Duff `over`
+(pinned; linear or sRGB by `color_space`, default linear), `other`'s
+top-left at `at` (a `Rectangle`, default `(0, 0)`), clipped to the
+canvas; a layer still at its file scale resamples to the run scale
+here (the composite the one-resample's second trigger, §8).
+*Gate:* headless, on real pairs: the `over` exact at 8-bit (the
+pinned math — byte-identical where an alpha is 0 or 255), the `at`
+offset and the canvas clip exact.
+
+**Phase 6c — `luma_at`.** The real `luma_at`: the mean, over the
+region (clipped to the canvas), of the Rec. 709 luma of the region's
+stored sRGB RGB channels (alpha ignored), 0–255 (the small
+sRGB-read region, §3b).
+*Gate:* on the sample backgrounds, headless: the `luma_at` matching
+the 709 mean.
+
+**Phase 6d — `fill`.** The real `fill`: the paint of a `Rectangle` or
+`Text` region with a hex color, the space by the region's kind (a
+`Rectangle` region composites in linear, a `Text` region in sRGB).
+*Gate:* headless, on real pairs: the `fill` exact at 8-bit (the
+pinned math); the `Text` region's path verified with the real text
+in Phase 7.
 
 **Phase 7 — text.** `font.rs` + `text.rs` on `cosmic-text` (the face
 via `FontSet` from the file's bytes — the path relative to the
@@ -436,5 +461,6 @@ question for engine outputs.
 
 ## 9. Next
 
-The phase ladder is settled (§7); the next working step is Phase 6
-(the compositing: `blend`, `fill`, `luma_at`, and the `Rectangle`).
+The phase ladder is settled (§7); the next working step is Phase 6a
+(the real `Rectangle`: the constructor, `padded`, the real-px
+geometry).

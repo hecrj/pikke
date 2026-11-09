@@ -15,6 +15,7 @@ use anywho::anywho;
 
 use engine::Engine;
 pub use image::Image;
+pub use rectangle::Rectangle;
 pub use viewport::Viewport;
 
 fn main() -> anywho::Result<()> {

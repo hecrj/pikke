@@ -11,6 +11,8 @@ no content knowledge.
 ## Rust
 
 - Modules around single-noun types; no `ops`/`utils` catch-alls.
+- The Lua boundary is `install`: argument sanitization lives there;
+  the type's methods are pure, decoupled from Lua.
 - Shadowing is fine: a function may share its name with the value
   it reads or produces, and a local may shadow a function name.
   Name things by what they are; do not rename to dodge a

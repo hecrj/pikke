@@ -1,6 +1,6 @@
 use mlua::{Lua, Result, Table, UserData, UserDataFields, UserDataMethods};
 
-use crate::rectangle::Rectangle;
+use crate::Rectangle;
 
 pub struct Text;
 
@@ -11,7 +11,7 @@ impl UserData for Text {
 
     fn add_methods<M: UserDataMethods<Text>>(methods: &mut M) {
         methods.add_method("bounds", |_lua, _this, _args: ()| -> Result<Rectangle> {
-            Ok(Rectangle)
+            Ok(Rectangle::default())
         });
     }
 }

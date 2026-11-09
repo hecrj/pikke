@@ -267,8 +267,13 @@ impl UserData for Image {
         methods.add_method("height", |_lua, this, _args: ()| -> Result<u32> {
             Ok(this.logical_height())
         });
-        methods.add_method("size", |_lua, this, _args: ()| -> Result<(u32, u32)> {
-            Ok((this.logical_width(), this.logical_height()))
+        // A single {w, h} pair: the convenience for `rectangle`'s
+        // `size` (§6).
+        methods.add_method("size", |lua, this, _args: ()| -> Result<Table> {
+            let size = lua.create_table()?;
+            size.set(1, this.logical_width())?;
+            size.set(2, this.logical_height())?;
+            Ok(size)
         });
         methods.add_method("clone", |_lua, this, _args: ()| -> Result<Image> {
             // Cheap (shares the buffer's Arc); the pixel copy is deferred
