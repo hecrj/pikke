@@ -34,7 +34,9 @@ Consequently the linear-f32 resample is home-grown — the `image`
 crate's resampler is u8-only (it cannot resample the buffer's
 precision). The default, the cubic, is GIMP's resize as-is (GEGL's
 cubic sampler: the BC-spline b = 1/2, c = 1/4, the downsample's
-sub-block average of its fixed 4-tap, the abyss at the edge) — the
+sub-block average of its fixed 4-tap, the out-of-domain taps
+clamped to the boundary — GIMP's CLAMP abyss — so a constant plane
+stays constant at the edge) — the
 B-spline (its b = 1.0 corner) proved too soft against it, and its
 mild lobe keeps the fringing at GIMP's level; the lanczos is a
 Lanczos-3 (support-scaled taps, renormalized to their gathered

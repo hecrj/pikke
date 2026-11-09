@@ -516,6 +516,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_resize_keeps_a_constant_plane_constant() {
+        let viewport = Viewport {
+            width: 8,
+            height: 8,
+            scale: 1.0,
+        };
+        let expected = Color {
+            r: 0.5,
+            g: 0.5,
+            b: 0.5,
+            a: 1.0,
+        }
+        .demultiply()
+        .linear_to_srgb()
+        .to_rgba_u8();
+
+        for filter in [Filter::Cubic, Filter::Lanczos] {
+            for target in [4.0, 16.0] {
+                let mut image = square([0.5, 0.5, 0.5, 1.0], 8, viewport);
+                image.resize(target, target, filter, Mode::Stretch);
+                for pixel in image.to_rgba8().chunks(4) {
+                    assert_eq!(pixel, &expected);
+                }
+            }
+        }
+    }
+
     fn synthetic_linear(pixels: &[[f32; 4]], viewport: Viewport) -> Image {
         let plane = |channel: usize| pixels.iter().map(|pixel| pixel[channel]).collect();
 

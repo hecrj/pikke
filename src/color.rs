@@ -276,10 +276,8 @@ fn pass_cubic(
             let ix = shifted.floor() as i64;
             let frac = shifted - ix as f64;
             for d in -1..=2i64 {
-                let t = ix + d;
-                if (0..src_len as i64).contains(&t) {
-                    acc += cubic(frac - d as f64) as f32 * src[t as usize * src_stride];
-                }
+                let t = (ix + d).clamp(0, (src_len - 1) as i64) as usize;
+                acc += cubic(frac - d as f64) as f32 * src[t * src_stride];
             }
         }
         out[i * dst_stride] = acc / n as f32;
