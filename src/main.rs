@@ -53,9 +53,9 @@ fn main() -> anywho::Result<()> {
                     .parse()
                     .map_err(|_| anywho!("invalid --width value: {value}"))?;
 
-                if value == 0 {
+                if !(1..=u16::MAX as u32).contains(&value) {
                     return Err(anywho!(
-                        "invalid --width value: {value} (must be greater than 0)"
+                        "invalid --width value: {value} (must be between 1 and 65535)"
                     ));
                 }
 
@@ -70,9 +70,9 @@ fn main() -> anywho::Result<()> {
                     .parse()
                     .map_err(|_| anywho!("invalid --height value: {value}"))?;
 
-                if value == 0 {
+                if !(1..=u16::MAX as u32).contains(&value) {
                     return Err(anywho!(
-                        "invalid --height value: {value} (must be greater than 0)"
+                        "invalid --height value: {value} (must be between 1 and 65535)"
                     ));
                 }
 

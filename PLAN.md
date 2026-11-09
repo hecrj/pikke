@@ -129,6 +129,17 @@ record where they occur and folded back into DESIGN.md later:
   pixel is colorless), × 255 (the linear scale — the same scale as
   the autocontrast histogram's luma); a region with no canvas
   overlap — or a negative size — reads 0 (colorless).
+- **`fill`'s paint and span:** the color is a `#RRGGBB` hex (exactly
+  six digits after `#`), decoded sRGB → linear at full opacity. The
+  region's span — each edge × the run scale — is painted **unrounded**
+  through `vello_cpu`'s coverage rasterizer (the region in logical
+  real px under the run-scale transform; its alpha mask is the
+  sub-pixel coverage) and the pinned paint composited over the buffer
+  with the pinned `over` — a paint span is sub-pixel geometry, so the
+  geometry-rounding clause does not apply to it. A `Text` region is
+  accepted but carries no paint while `text` is mocked. A
+  non-finite or non-positive span paints nothing. `--width`/`--height`
+  are capped at 65535 (the rasterizer's surface bound).
 - **Geometry rounding:** positions, sizes and resize targets are real
   px; every geometric result — and the logical → physical transform
   itself — rounds to integer px, ties away from zero (Rust's
@@ -382,12 +393,29 @@ autocontrast histogram).
 *Gate:* on the sample backgrounds, headless: the `luma_at` matching
 the 709 mean.
 
-**Phase 6d — `fill`.** The real `fill`: the paint of a `Rectangle` or
-`Text` region with a hex color, the space by the region's kind (a
-`Rectangle` region composites in linear, a `Text` region in sRGB).
-*Gate:* headless, on real pairs: the `fill` exact at 8-bit (the
-pinned math); the `Text` region's path verified with the real text
-in Phase 7.
+**Phase 6d — `fill` (done).** The real `fill` on `vello_cpu` 0.3
+(`std` + `u8_pipeline`; no `png`, `text` or `multithreading`): the
+rasterizer is used for **coverage only** — the region's span in
+logical real px under the run-scale transform (vello's CTM, unrounded
+— the §3b `fill` delta) filled
+opaque, its alpha mask read, and the pinned hex paint (sRGB →
+linear, full opacity) composited over the buffer with the pinned
+`over` in linear — the `Rectangle` kind's space. A `Text` region is
+accepted but paints nothing while `text` is mocked (the real sRGB
+ink paint lands in Phase 7); `standard.lua` fills one. `#RRGGBB`
+only (six hex digits after `#`); a non-finite or non-positive span
+paints nothing. The harness caps `--width`/`--height` at 65535
+(vello's surface bound).
+*Gate (met):* an aligned region paints byte-exactly (the interior
+the hex's own bytes, the outside untouched) — pinning vello's exact
+0/255 aligned coverage; fractional edges match the pinned composite
+at frozen u8-pipeline coverages (exact area, rounded to u8: ¼ → 64,
+½ → 128 at scale 1; ¾² → 143 at scale 0.5 — frozen from a one-off
+probe mirroring the engine); a degenerate span is a no-op; the
+binding rejects bad hex and wrong-kind regions with user-facing
+errors and accepts `Text`; the smoke's `padded(30)` box lands
+byte-exact at the corner (PIL). The `Text` region's real sRGB ink
+paint is verified with the real text in Phase 7.
 
 **Phase 7 — text.** `font.rs` + `text.rs` on `cosmic-text` (the face
 via `FontSet` from the file's bytes — the path relative to the
@@ -470,6 +498,6 @@ question for engine outputs.
 
 ## 9. Next
 
-The phase ladder is settled (§7); the next working step is Phase 6d
-(the real `fill`: the hex paint of a `Rectangle` or `Text` region —
-a `Rectangle` region composites in linear, a `Text` region in sRGB).
+The phase ladder is settled (§7); the next working step is Phase 7
+(text: `font.rs` + `text.rs` on `cosmic-text` — the real glyphs, the
+ink box, and with them the `Text` region's sRGB `fill`).

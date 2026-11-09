@@ -4,8 +4,14 @@ use std::sync::Arc;
 use anywho::anywho;
 use image::{ColorType, ImageFormat};
 use mlua::{AnyUserData, Lua, Result, Table, UserData, UserDataFields, UserDataMethods};
+use vello_cpu::kurbo::{Affine, Rect};
+use vello_cpu::{
+    Pixmap, RenderContext, Resources,
+    color::{AlphaColor, Srgb},
+};
 
 use crate::color::{Color, Filter, Space, crop, luma_linear, resize};
+use crate::text::Text;
 use crate::{Rectangle, Viewport};
 
 #[derive(Clone, Debug)]
@@ -239,6 +245,60 @@ impl Image {
         }
     }
 
+    pub fn fill(&mut self, region: Rectangle, paint: Color) {
+        let left = region.x;
+        let top = region.y;
+        let right = region.x + region.width;
+        let bottom = region.y + region.height;
+        if region.width <= 0.0 || region.height <= 0.0 {
+            return;
+        }
+        if !left.is_finite() || !top.is_finite() || !right.is_finite() || !bottom.is_finite() {
+            return;
+        }
+
+        let width = self.width as u16;
+        let height = self.height as u16;
+        let mut resources = Resources::new();
+        let mut context = RenderContext::new(width, height);
+        context.set_transform(Affine::scale(self.scale.into()));
+        context.set_paint(AlphaColor::<Srgb>::BLACK);
+        context.fill_rect(&Rect::new(
+            left.into(),
+            top.into(),
+            right.into(),
+            bottom.into(),
+        ));
+        let mut pixmap = Pixmap::new(width, height);
+        context.render(&mut pixmap, &mut resources);
+
+        let buffer = Arc::make_mut(&mut self.buffer);
+        let (base_r, base_g, base_b, base_a) =
+            (&mut buffer.r, &mut buffer.g, &mut buffer.b, &mut buffer.a);
+        for (i, pixel) in pixmap.data().iter().enumerate() {
+            let cover = pixel.a as f32 / 255.0;
+            if cover > 0.0 {
+                let base = Color {
+                    r: base_r[i],
+                    g: base_g[i],
+                    b: base_b[i],
+                    a: base_a[i],
+                };
+                let layer = Color {
+                    r: paint.r * cover,
+                    g: paint.g * cover,
+                    b: paint.b * cover,
+                    a: cover,
+                };
+                let blended = base.over(layer);
+                base_r[i] = blended.r;
+                base_g[i] = blended.g;
+                base_b[i] = blended.b;
+                base_a[i] = blended.a;
+            }
+        }
+    }
+
     pub fn luma_at(&self, region: Rectangle) -> f32 {
         let left = self.viewport.to_physical_signed(region.x);
         let top = self.viewport.to_physical_signed(region.y);
@@ -313,6 +373,19 @@ fn load(path: &Path, viewport: Viewport) -> anywho::Result<Image> {
         scale: 1.0,
         viewport,
     })
+}
+
+fn paint_from_hex(color: &str) -> Result<Color> {
+    let message = || format!("fill: {color} is not a #RRGGBB hex color");
+    let digits = color
+        .strip_prefix('#')
+        .filter(|digits| digits.len() == 6)
+        .ok_or_else(|| mlua::Error::RuntimeError(message()))?;
+    let channel = |start: usize| -> Result<u8> {
+        u8::from_str_radix(&digits[start..start + 2], 16)
+            .map_err(|_| mlua::Error::RuntimeError(message()))
+    };
+    Ok(Color::from_rgba_u8([channel(0)?, channel(2)?, channel(4)?, 255]).srgb_to_linear())
 }
 
 impl UserData for Image {
@@ -427,7 +500,23 @@ impl UserData for Image {
         );
         methods.add_method_mut(
             "fill",
-            |_lua, _this, (_region, _color): (mlua::Value, String)| -> Result<()> { Ok(()) },
+            |_lua, this, (region, color): (AnyUserData, String)| -> Result<()> {
+                let paint = paint_from_hex(&color)?;
+                match region.borrow::<Rectangle>() {
+                    Ok(region) => {
+                        this.fill(*region, paint);
+                        Ok(())
+                    }
+                    Err(_) => {
+                        region.borrow::<Text>().map_err(|_| {
+                            mlua::Error::RuntimeError(
+                                "fill: the region must be a `Rectangle` or a `Text`".to_owned(),
+                            )
+                        })?;
+                        Ok(())
+                    }
+                }
+            },
         );
         methods.add_method(
             "luma_at",
@@ -461,8 +550,11 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
 
+    use mlua::Lua;
+
     use super::{Buffer, Filter, Image, Mode, load};
     use crate::color::{Color, Space, luma_linear};
+    use crate::text::Text;
     use crate::{Rectangle, Viewport};
 
     #[test]
@@ -1008,5 +1100,168 @@ mod tests {
         let mut expected = layer.clone();
         expected.resize(512.0, 512.0, Filter::default(), Mode::Stretch);
         assert_eq!(base.to_rgba8(), expected.to_rgba8());
+    }
+
+    #[test]
+    fn the_fill_paints_an_aligned_region_exactly() {
+        let viewport = Viewport {
+            width: 8,
+            height: 8,
+            scale: 1.0,
+        };
+        let mut image = Image::transparent(8, 8, viewport);
+        let paint = Color::from_rgba_u8([128, 160, 192, 255]).srgb_to_linear();
+
+        image.fill(Rectangle::new(1.0, 2.0, 4.0, 3.0), paint);
+
+        let painted = image.to_rgba8();
+        for y in 0..8u32 {
+            for x in 0..8u32 {
+                let pixel = (y * 8 + x) as usize * 4;
+                let inside = (1..5).contains(&x) && (2..5).contains(&y);
+                let expected = if inside {
+                    [128, 160, 192, 255]
+                } else {
+                    [0, 0, 0, 0]
+                };
+                assert_eq!(&painted[pixel..pixel + 4], &expected);
+            }
+        }
+    }
+
+    #[test]
+    fn the_fill_antialiases_fractional_edges() {
+        let viewport = Viewport {
+            width: 4,
+            height: 4,
+            scale: 1.0,
+        };
+        let mut image = Image::transparent(4, 4, viewport);
+        let paint = Color::from_rgba_u8([255, 0, 0, 255]).srgb_to_linear();
+
+        image.fill(Rectangle::new(0.5, 0.5, 3.0, 3.0), paint);
+
+        let coverages = [
+            64, 128, 128, 64, 128, 255, 255, 128, 128, 255, 255, 128, 64, 128, 128, 64,
+        ];
+        let painted = image.to_rgba8();
+        for (i, coverage) in coverages.iter().enumerate() {
+            let cover = *coverage as f32 / 255.0;
+            let expected = Color {
+                r: paint.r * cover,
+                g: 0.0,
+                b: 0.0,
+                a: cover,
+            }
+            .demultiply()
+            .linear_to_srgb()
+            .to_rgba_u8();
+            assert_eq!(&painted[i * 4..i * 4 + 4], &expected);
+        }
+    }
+
+    #[test]
+    fn the_fill_antialiases_at_the_run_scale() {
+        let viewport = Viewport {
+            width: 8,
+            height: 8,
+            scale: 0.5,
+        };
+        let mut image = Image::transparent(8, 8, viewport);
+        let paint = Color::from_rgba_u8([0, 255, 255, 255]).srgb_to_linear();
+
+        image.fill(Rectangle::new(0.5, 0.5, 3.0, 3.0), paint);
+
+        let coverages = [
+            143, 143, 0, 0, 0, 0, 0, 0, 143, 143, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        let painted = image.to_rgba8();
+        for (i, coverage) in coverages.iter().enumerate() {
+            let cover = *coverage as f32 / 255.0;
+            let expected = Color {
+                r: 0.0,
+                g: paint.g * cover,
+                b: paint.b * cover,
+                a: cover,
+            }
+            .demultiply()
+            .linear_to_srgb()
+            .to_rgba_u8();
+            assert_eq!(&painted[i * 4..i * 4 + 4], &expected);
+        }
+    }
+
+    #[test]
+    fn the_fill_is_a_no_op_for_degenerate_regions() {
+        let viewport = Viewport {
+            width: 4,
+            height: 4,
+            scale: 1.0,
+        };
+        let mut image = Image::transparent(4, 4, viewport);
+        let paint = Color::from_rgba_u8([255, 255, 255, 255]).srgb_to_linear();
+
+        image.fill(Rectangle::new(0.0, 0.0, 0.0, 0.0), paint);
+        image.fill(Rectangle::new(0.0, 0.0, -2.0, 2.0), paint);
+        image.fill(Rectangle::new(f32::NAN, 0.0, 2.0, 2.0), paint);
+
+        let painted = image.to_rgba8();
+        assert!(painted.iter().all(|&byte| byte == 0));
+    }
+
+    #[test]
+    fn the_fill_binding_validates_its_arguments() {
+        let lua = Lua::new();
+        let viewport = Viewport {
+            width: 4,
+            height: 4,
+            scale: 1.0,
+        };
+        let image = Image::transparent(4, 4, viewport);
+        let output = lua.create_userdata(image).unwrap();
+        let region = lua
+            .create_userdata(Rectangle::new(0.0, 0.0, 2.0, 2.0))
+            .unwrap();
+        let text = lua.create_userdata(Text).unwrap();
+
+        let env = lua.create_table().unwrap();
+        env.set("output", output.clone()).unwrap();
+        env.set("region", region.clone()).unwrap();
+        env.set("text", text.clone()).unwrap();
+
+        for color in ["808080", "#12345", "#GGGGGG", "#1234567"] {
+            let error = lua
+                .load(format!("output:fill(region, \"{color}\")"))
+                .set_environment(env.clone())
+                .eval::<()>()
+                .unwrap_err();
+            assert!(error.to_string().contains("not a #RRGGBB hex color"));
+        }
+
+        let error = lua
+            .load("output:fill(output, \"#000000\")")
+            .set_environment(env.clone())
+            .eval::<()>()
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("the region must be a `Rectangle` or a `Text`")
+        );
+
+        lua.load("output:fill(text, \"#000000\")")
+            .set_environment(env.clone())
+            .eval::<()>()
+            .unwrap();
+
+        lua.load("output:fill(region, \"#FF0000\")")
+            .set_environment(env)
+            .eval::<()>()
+            .unwrap();
+        let painted = output.borrow::<Image>().unwrap().clone();
+        assert!(painted.buffer.r[5] > 0.0);
+        assert_eq!(painted.buffer.a[5], 1.0);
     }
 }
