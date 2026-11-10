@@ -11,6 +11,7 @@ mod text;
 mod viewport;
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use anywho::anywho;
 
@@ -69,6 +70,7 @@ fn main() -> anywho::Result<()> {
     let engine = Engine::load(script, scale)?;
 
     let mut show_help = false;
+    let mut output = None;
     let mut values = BTreeMap::new();
 
     while let Some(arg) = args.next() {
@@ -79,6 +81,12 @@ fn main() -> anywho::Result<()> {
             "--scale" => {
                 // Already parsed
                 let _ = args.next();
+            }
+            "--output" => {
+                output = Some(
+                    args.next()
+                        .ok_or_else(|| anywho!("--output requires a value"))?,
+                );
             }
             argument if argument.starts_with('-') => {
                 let option = argument.trim_start_matches('-').to_owned();
@@ -131,7 +139,7 @@ fn main() -> anywho::Result<()> {
             .join(" ")
     );
 
-    engine.run(&arguments)
+    engine.run(&arguments, output.as_deref().map(Path::new))
 }
 
 fn help(engine: Option<&Engine>) -> String {
@@ -139,13 +147,14 @@ fn help(engine: Option<&Engine>) -> String {
         "pikke — a compositing engine for Lua design scripts
 
 Usage:
-  pikke <script> [--scale <s>] [options]
+  pikke <script> [--scale <s>] [--output <path>] [options]
 
 Arguments:
   <script>          Path to a design script (.lua)
 
 Options:
   --scale <s>       The run's scale (default 1)
+  --output <path>   The output's path (default <script>.png)
   --help            Print this help",
     );
 

@@ -47,7 +47,7 @@ weight, a unit-scale axis copied). See Phase 5a.
 **Goal.** `pikke` (`DESIGN.md`) in Rust — focused on color accuracy
 and correctness: v1 loads a design script, binds its parameters,
 executes it against the op table, and encodes the yielded frames
-(one frame → `output.png`, many → `output.mp4`).
+(one frame → a PNG, many → an MP4).
 
 **Non-goals for v1** (explicit):
 
@@ -90,8 +90,8 @@ From the design review (2026-11-08):
   sRGB, a `Rectangle` region in linear — no parameter (the best
   strategy per region kind). `blend` keeps its explicit
   `color_space` (default linear).
-- **Outputs hardcoded:** `output.png` / `output.mp4` in the working
-  directory.
+- **Output path:** the working directory, named after the script
+  (`<script>.png` / `<script>.mp4`); `--output` overrides the path.
 - **ffmpeg flags hardcoded** (the default run).
 - The example design's simplifications (a draft) stand for now — it
   is an example, and the Phase 10 inspection is what distinguishes
@@ -171,7 +171,9 @@ record where they occur and folded back into DESIGN.md later:
   `render(args)` with a single table of the bound values. v1: a
   flag's value is a string; an omitted or empty flag binds `nil`
   (optionality is the script's — it guards the optional ones); the
-  script converts where it needs a number.
+  script converts where it needs a number. The engine's own flag
+  names (`scale`, `output`) are reserved argument names — a script
+  declaring one fails the load.
 
 ## 4. The script's state
 
@@ -192,29 +194,33 @@ record where they occur and folded back into DESIGN.md later:
 ## 5. The v1 harness
 
 - **CLI:**
-  `pikke <script> [--scale <s>] [--<param> <value>]...` — the
-  script is the first argument (its parameter flags only exist once
-  it is loaded); one named flag per entry-function parameter,
-  created on the fly from the introspected names (§3b; for the
-  example design: `--id --title --subtitle --animation --time`).
+  `pikke <script> [--scale <s>] [--output <path>]
+  [--<param> <value>]...` — the script is the first argument (its
+  parameter flags only exist once it is loaded); one named flag per
+  entry-function parameter, created on the fly from the introspected
+  names (§3b; for the example design: `--id --title --subtitle
+  --animation --time`).
   The engine holds no canvas — the script decides its dims — so
   `--scale` (the run's scale, defaulting to 1) is the caller's only
-  knob; each logical dim × the scale, rounded (Rust's `round`), is
-  the physical dim. The MP4 path needs even physical dims (the
-  script's choice; 1640×2048 at 0.5/1.0/2.0 are all even). A flag's
-  value is a string; an omitted or empty flag binds `nil`. Errors go
-  to stderr with a non-zero exit.
+  sizing knob; each logical dim × the scale, rounded (Rust's
+  `round`), is the physical dim. `--output` the output's path
+  (default the script's file name with a `.png`/`.mp4` extension).
+  The MP4 path needs even physical dims (the script's choice;
+  1640×2048 at 0.5/1.0/2.0 are all even). A flag's value is a
+  string; an omitted or empty flag binds `nil`. Errors go to stderr
+  with a non-zero exit.
 - **Run size:** the default run is without `--scale` (i.e. 1); a
   scaled run (Phase 10) runs `--scale 0.5` against the example
   design's own 1640×2048 (physical 820×1024). The script's dims are
   its own; an image's `physical_width`/`physical_height` report the
   derived physical.
-- **Outputs:** `output.png` / `output.mp4` in the working directory.
-  The engine does not know the kind in advance: frame 1 is held, and
-  frame 2's arrival starts the MP4 path (flushing frame 1 into the
-  encoder). One yielded frame → the PNG. All frames share frame 1's
-  dims (`yield`'s invariant, §3b), so the encoder's size is fixed at
-  frame 1.
+- **Outputs:** in the working directory, named after the script —
+  `hello.lua` → `hello.png` / `hello.mp4`; `--output <path>`
+  overrides the path. The engine does not know the kind in advance:
+  frame 1 is held, and frame 2's arrival starts the MP4 path
+  (flushing frame 1 into the encoder). One yielded frame → the PNG.
+  All frames share frame 1's dims (`yield`'s invariant, §3b), so the
+  encoder's size is fixed at frame 1.
 - **PNG:** RGBA — the buffer's alpha as-is, no need to drop it (the
   base is opaque, so 255 throughout). Written atomically.
 - **MP4:** the frame stream piped to ffmpeg, hardcoded (the default
@@ -466,14 +472,14 @@ byte-for-byte (no free op between them).
 **Phase 9 — the encoder.** The PNG writer (RGBA, atomic) and the
 ffmpeg MP4 pipe (the default flags, §5); the PNG/MP4 decision at
 frame 2 (§5) replaces the Phase 2 yield recorder.
-*Gate:* one frame → `output.png` decoding back to the frame
-byte-for-byte (lossless); N frames → `output.mp4` with N frames
+*Gate:* one frame → `<script>.png` decoding back to the frame
+byte-for-byte (lossless); N frames → `<script>.mp4` with N frames
 (ffprobe).
 
 **Phase 10 — the example design, end to end.** Run the example
 design at a run scale: `pikke <script> --scale 0.5 <params>` (the
 script's own 1640×2048; the omitted optional parameters bind `nil`,
-and the script omits the flags they feed) and inspect `output.png`.
+and the script omits the flags they feed) and inspect `<script>.png`.
 *Gate:* the composite is correct end to end — the geometry exact
 (the fit, the crop, the placed elements' positions, all logical px
 at the run scale), the effects visible (the stretch, the frame

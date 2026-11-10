@@ -72,7 +72,11 @@ impl Engine {
         &self.arguments
     }
 
-    pub fn run(&self, params: &[(String, Option<String>)]) -> anywho::Result<()> {
+    pub fn run(
+        &self,
+        params: &[(String, Option<String>)],
+        output: Option<&Path>,
+    ) -> anywho::Result<()> {
         let frames = Rc::new(RefCell::new(Vec::new()));
         let yielded = frames.clone();
 
@@ -107,10 +111,15 @@ impl Engine {
 
         match frames.len() {
             1 => {
-                frames[0].write()?;
+                let output = output
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| default_output(self.script()));
+
+                frames[0].write(&output)?;
 
                 eprintln!(
-                    "output: output.png ({}×{})",
+                    "output: {} ({}×{})",
+                    output.display(),
                     frames[0].width(),
                     frames[0].height()
                 );
@@ -121,6 +130,13 @@ impl Engine {
 
         Ok(())
     }
+}
+
+fn default_output(script: &Path) -> PathBuf {
+    script
+        .file_name()
+        .map(|name| Path::new(name).with_extension("png"))
+        .unwrap_or(PathBuf::from("output.png"))
 }
 
 fn arguments(script: &Path, env: &Table) -> anywho::Result<Vec<String>> {
@@ -139,9 +155,9 @@ fn arguments(script: &Path, env: &Table) -> anywho::Result<Vec<String>> {
 
     for (i, argument) in arguments.sequence_values().enumerate() {
         match argument {
-            Ok(name) if name == "scale" => {
+            Ok(name) if name == "scale" || name == "output" => {
                 return Err(anywho!(
-                    "script {}: 'scale' is a reserved argument name",
+                    "script {}: '{name}' is a reserved argument name",
                     script.display()
                 ));
             }
@@ -161,9 +177,10 @@ fn arguments(script: &Path, env: &Table) -> anywho::Result<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Engine, Scale};
+    use super::{Engine, Scale, default_output};
 
     use std::io::Write;
+    use std::path::Path;
 
     fn load_script(name: &str, source: &str) -> (Engine, std::path::PathBuf) {
         let dir =
@@ -221,5 +238,43 @@ end
             Err(error) => error.to_string(),
         };
         assert!(error.contains("must be a table"));
+    }
+
+    #[test]
+    fn the_load_rejects_a_reserved_argument_name() {
+        let dir =
+            std::env::temp_dir().join(format!("pikke-engine-test-{}-reserved", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("script.lua");
+        std::fs::write(
+            &path,
+            r#"
+arguments = {"output"}
+function render(args)
+end
+"#,
+        )
+        .unwrap();
+        let error = match Engine::load(&path, Scale::default()) {
+            Ok(_) => panic!("expected a load error"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("reserved argument name"));
+    }
+
+    #[test]
+    fn the_default_output_is_the_script_name_with_a_png_extension() {
+        assert_eq!(
+            default_output(Path::new("hello.lua")),
+            std::path::PathBuf::from("hello.png")
+        );
+        assert_eq!(
+            default_output(Path::new("personal/standard.lua")),
+            std::path::PathBuf::from("standard.png")
+        );
+        assert_eq!(
+            default_output(Path::new("noext")),
+            std::path::PathBuf::from("noext.png")
+        );
     }
 }

@@ -478,13 +478,18 @@ impl Image {
         Ok(luma / ((right - left) * (bottom - top)) as f32 * 255.0)
     }
 
-    pub fn write(&self) -> anywho::Result<()> {
+    pub fn write(&self, output: &Path) -> anywho::Result<()> {
         let rgba8 = self.to_rgba8();
-        let target = Path::new("output.png");
-        let temp = Path::new("output.png.tmp");
+
+        let file_name = output
+            .file_name()
+            .ok_or_else(|| anywho!("invalid output path: {}", output.display()))?;
+        let mut temp_name = file_name.to_os_string();
+        temp_name.push(".tmp");
+        let temp = output.with_file_name(temp_name);
 
         image::save_buffer_with_format(
-            temp,
+            &temp,
             &rgba8,
             u32::from(self.width()),
             u32::from(self.height()),
@@ -492,12 +497,12 @@ impl Image {
             ImageFormat::Png,
         )
         .map_err(|error| {
-            let _ = std::fs::remove_file(temp);
-            anywho!("failed to write output.png: {error}")
+            let _ = std::fs::remove_file(&temp);
+            anywho!("failed to write {}: {error}", output.display())
         })?;
 
-        std::fs::rename(temp, target)
-            .map_err(|error| anywho!("failed to finalize output.png: {error}"))?;
+        std::fs::rename(&temp, output)
+            .map_err(|error| anywho!("failed to finalize {}: {error}", output.display()))?;
 
         Ok(())
     }
