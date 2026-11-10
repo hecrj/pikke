@@ -1,7 +1,7 @@
+use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
-use anywho::anywho;
 use image::{ColorType, ImageFormat};
 use mlua::{AnyUserData, Lua, Table, UserData, UserDataFields, UserDataMethods};
 use skrifa::outline::{OutlineGlyphCollection, OutlinePen};
@@ -14,7 +14,7 @@ use vello_cpu::{
 
 use crate::color::{Color, Filter, Space, crop, luma_linear, resize};
 use crate::text::Text;
-use crate::{Rectangle, Result, Scale, Viewport};
+use crate::{Error, Rectangle, Result, Scale, Viewport};
 
 #[derive(Clone, Debug)]
 pub struct Image {
@@ -53,6 +53,27 @@ impl Image {
             }),
             viewport,
             target_scale: scale,
+        })
+    }
+
+    pub fn from_rgba8(viewport: Viewport, rgba: &[u8]) -> Result<Self> {
+        let count = viewport.total_pixels();
+
+        if rgba.len() != count * 4 {
+            return Err(Error::InvalidPixelData {
+                width: viewport.width(),
+                height: viewport.height(),
+                expected: count * 4,
+                got: rgba.len(),
+            });
+        }
+
+        let (r, g, b, a) = decode_rgba8(rgba);
+
+        Ok(Self {
+            buffer: Arc::new(Buffer { r, g, b, a }),
+            viewport,
+            target_scale: viewport.scale(),
         })
     }
 
@@ -478,16 +499,16 @@ impl Image {
         Ok(luma / ((right - left) * (bottom - top)) as f32 * 255.0)
     }
 
-    pub fn write(&self, output: &Path) -> anywho::Result<()> {
-        let rgba8 = self.to_rgba8();
+    pub fn write(&self, output: &Path) -> Result<()> {
+        let file_name = output.file_name().ok_or_else(|| {
+            io::Error::other(format!("invalid output path: {}", output.display()))
+        })?;
 
-        let file_name = output
-            .file_name()
-            .ok_or_else(|| anywho!("invalid output path: {}", output.display()))?;
         let mut temp_name = file_name.to_os_string();
         temp_name.push(".tmp");
         let temp = output.with_file_name(temp_name);
 
+        let rgba8 = self.to_rgba8();
         image::save_buffer_with_format(
             &temp,
             &rgba8,
@@ -496,25 +517,31 @@ impl Image {
             ColorType::Rgba8,
             ImageFormat::Png,
         )
-        .map_err(|error| {
+        .inspect_err(|_| {
             let _ = std::fs::remove_file(&temp);
-            anywho!("failed to write {}: {error}", output.display())
         })?;
 
-        std::fs::rename(&temp, output)
-            .map_err(|error| anywho!("failed to finalize {}: {error}", output.display()))?;
+        std::fs::rename(&temp, output)?;
 
         Ok(())
     }
 }
 
-fn load(path: &Path, target_scale: Scale) -> anywho::Result<Image> {
-    let rgba = image::open(path)
-        .map_err(|error| anywho!("failed to load {}: {error}", path.display()))?
-        .to_rgba8();
+fn load(path: &Path, target_scale: Scale) -> Result<Image> {
+    let rgba = image::open(path)?.to_rgba8();
 
     let (width, height) = (rgba.width(), rgba.height());
-    let count = (width * height) as usize;
+    let (r, g, b, a) = decode_rgba8(&rgba);
+
+    Ok(Image {
+        buffer: Arc::new(Buffer { r, g, b, a }),
+        viewport: Viewport::from_physical_u32(width, height, Scale::default())?,
+        target_scale,
+    })
+}
+
+fn decode_rgba8(rgba: &[u8]) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
+    let count = rgba.len() / 4;
 
     let (mut r, mut g, mut b, mut a) = (
         Vec::with_capacity(count),
@@ -524,20 +551,15 @@ fn load(path: &Path, target_scale: Scale) -> anywho::Result<Image> {
     );
 
     for pixel in rgba.as_chunks::<4>().0 {
-        let color = Color::from_rgba_u8([pixel[0], pixel[1], pixel[2], pixel[3]])
-            .srgb_to_linear()
-            .premultiply();
+        let color = Color::from_rgba_u8(*pixel).srgb_to_linear().premultiply();
+
         r.push(color.r);
         g.push(color.g);
         b.push(color.b);
         a.push(color.a);
     }
 
-    Ok(Image {
-        buffer: Arc::new(Buffer { r, g, b, a }),
-        viewport: Viewport::from_physical_u32(width, height, Scale::default())?,
-        target_scale,
-    })
+    (r, g, b, a)
 }
 
 struct PathPen {
@@ -610,12 +632,6 @@ impl UserData for Image {
         });
         fields.add_field_method_get("height", |_lua, this| -> mlua::Result<f32> {
             Ok(this.logical_height())
-        });
-        fields.add_field_method_get("physical_width", |_lua, this| -> mlua::Result<u16> {
-            Ok(this.viewport.width())
-        });
-        fields.add_field_method_get("physical_height", |_lua, this| -> mlua::Result<u16> {
-            Ok(this.viewport.height())
         });
         fields.add_field_method_get("size", |lua, this| -> mlua::Result<Table> {
             let size = lua.create_table()?;

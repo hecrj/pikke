@@ -37,6 +37,11 @@ no content knowledge.
 
 No comments allowed, unless explicitly requested during review.
 
+## Commits
+
+Every change must be reviewed by the user. Under no circumstance
+you are allowed to commit or push until explicitly asked to.
+
 ## Hygiene
 
 `cargo fmt --check` and `cargo lint` must be clean.

@@ -1,6 +1,4 @@
-use std::cell::RefCell;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 
 use anywho::anywho;
 use mlua::{AnyUserData, Function, Lua, Table};
@@ -81,15 +79,29 @@ impl Engine {
         params: &[(String, Option<String>)],
         output: Option<&Path>,
     ) -> anywho::Result<()> {
-        let frames = Rc::new(RefCell::new(Vec::new()));
-        let yielded = frames.clone();
+        let script = self.script.clone();
+        let output = output.map(Path::to_path_buf);
+        let mut frame_number = 0;
+        let mut dimensions = None;
 
         self.env.set(
             "yield",
             self.lua
-                .create_function(move |_lua, frame: AnyUserData| -> mlua::Result<()> {
+                .create_function_mut(move |_lua, frame: AnyUserData| -> mlua::Result<()> {
+                    frame_number += 1;
+
                     let frame = frame.borrow::<Image>()?;
-                    let frame_number = yielded.borrow().len() + 1;
+                    let width = frame.width();
+                    let height = frame.height();
+
+                    if let Some((run_width, run_height)) = dimensions
+                        && (width != run_width || height != run_height)
+                    {
+                        return Err(mlua::Error::RuntimeError(format!(
+                            "yield: frame {frame_number} is {}×{}, the run is {}×{}",
+                            width, height, run_width, run_height
+                        )));
+                    }
 
                     eprintln!(
                         "yield: frame {frame_number} ({}×{})",
@@ -97,7 +109,14 @@ impl Engine {
                         frame.height()
                     );
 
-                    yielded.borrow_mut().push((*frame).clone());
+                    if frame_number == 1 {
+                        dimensions = Some((frame.width(), frame.height()));
+
+                        let output = output.clone().unwrap_or_else(|| default_output(&script));
+                        frame.write(&output)?;
+                    } else {
+                        // TODO: Phase 9 - start ffmpeg and feed RGBA data
+                    }
 
                     Ok(())
                 })?,
@@ -110,27 +129,6 @@ impl Engine {
         }
 
         self.render.call::<()>(args)?;
-
-        let frames = frames.borrow();
-
-        match frames.len() {
-            1 => {
-                let output = output
-                    .map(Path::to_path_buf)
-                    .unwrap_or_else(|| default_output(self.script()));
-
-                frames[0].write(&output)?;
-
-                eprintln!(
-                    "output: {} ({}×{})",
-                    output.display(),
-                    frames[0].width(),
-                    frames[0].height()
-                );
-            }
-            0 => {}
-            _ => return Err(anywho!("the MP4 path lands in Phase 9")),
-        }
 
         Ok(())
     }
@@ -285,6 +283,30 @@ end
         let engine = Engine::load(&path, Scale::default()).unwrap();
         let required: String = engine.env.get("required").unwrap();
         assert_eq!(required, "config");
+    }
+
+    #[test]
+    fn the_yield_rejects_a_frame_at_other_dims() {
+        let (engine, _path) = load_script(
+            "yield-dims",
+            r#"
+function render(args)
+  yield(blank({ width = 10, height = 10 }))
+  yield(blank({ width = 20, height = 10 }))
+end
+"#,
+        );
+
+        let params: &[(String, Option<String>)] = &[];
+
+        let error = match engine.run(params, None) {
+            Ok(()) => panic!("expected a run error"),
+            Err(error) => error.to_string(),
+        };
+
+        assert!(error.contains("yield"), "{error}");
+        assert!(error.contains("20×10"), "{error}");
+        assert!(error.contains("10×10"), "{error}");
     }
 
     #[test]

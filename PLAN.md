@@ -453,22 +453,25 @@ real plate: the ink's top-left exactly `(x, y)` (pinned), the fill
 the hex's own bytes (the fully-covered pixels exact), the plate
 byte-identical outside the ink (PIL).
 
-**Phase 8 — the real Stream.** `stream`'s producer protocol: the
+**Phase 8 — the real `Stream` (done).** `stream`'s producer
+protocol: the logical viewport (the script passes the frame's
+viewport in logical px; the engine transforms it at the stream
+boundary and passes `--width`/`--height` to the producer, so the
+script stays unaware of physical coordinates end to end), the
 stdout frame reader (raw RGBA8 at the producer's viewport — the
-frame-size channel, §3b), the stderr drain (the bounded 1 MiB tail),
-the lazy iterator (one frame per step), the failure semantics (a
+frame-size channel), the stderr drain (the bounded 1 MiB tail), the
+lazy iterator (one frame per step), the failure semantics (a
 truncated stream or a non-zero exit → an error carrying the stderr
 tail), and the `yield` frame-size invariant (every frame shares the
 first frame's dims, §3b).
-*Gate (no GPU):* a synthetic producer (a small script writing N raw
-RGBA8 frames to stdout) — N frames yielded byte-for-byte; a
-truncated stream and a non-zero exit each surface as an error
-carrying the stderr tail; a stream whose frames differ in dims fails
-with the invariant's error. With the GPU: one real still (a frame
-producer through a minimal `background:blend(frame)` script, the
-viewport from the image's `physical_width`/`physical_height`
-fields) — the yielded frame equals the raw stream's frame
-byte-for-byte (no free op between them).
+*Gate (no GPU, met):* a synthetic producer (a small script writing
+N raw RGBA8 frames to stdout) — N frames yielded byte-for-byte, the
+viewport flags exact at scale 1 and 0.5; a truncated stream and a
+non-zero exit each surface as an error carrying the stderr tail; a
+stream whose frames differ in dims fails with the invariant's error.
+With the GPU: one real still (a frame producer through a minimal
+`background:blend(frame)` script) — the yielded frame equals the raw
+stream's frame byte-for-byte (no free op between them).
 
 **Phase 9 — the encoder.** The PNG writer (RGBA, atomic) and the
 ffmpeg MP4 pipe (the default flags, §5); the PNG/MP4 decision at
@@ -525,5 +528,6 @@ question for engine outputs.
 
 ## 9. Next
 
-The phase ladder is settled (§7); the next working step is Phase 8
-(the real `Stream`: the producer protocol).
+The phase ladder is settled (§7); the next working step is Phase 9
+(the encoder: the PNG writer, the ffmpeg MP4 pipe, and the
+PNG/MP4 decision at frame 2).
