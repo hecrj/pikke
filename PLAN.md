@@ -161,7 +161,7 @@ record where they occur and folded back into DESIGN.md later:
   ties away from zero — Rust's `round`; out-of-range linear values
   clamp).
 - **Parameters and entry:** the script's globals expose the op table
-  and, when the entry takes parameters, an `arguments` table
+  and, when the entry takes parameters, an `ARGUMENTS` table
   declaring them (in CLI order; absent — no parameters) — a table
   read, so the engine needs no `debug` library. The engine loads the
   script (paths — `image`/`font`/`require` — resolve against the
@@ -318,8 +318,9 @@ into DESIGN.md later.
 `luac5.4 -p` clean.
 
 **Phase 1 — the CLI, the VM, and the flags.** The `pikke` crate
-(mlua); the script loads into a dedicated environment; the entry's
-parameters are read from the script's `arguments` declaration (§3b)
+(mlua); the script runs in the state's globals, extended with the
+op table (§8); the entry's parameters are read from the script's
+`ARGUMENTS` declaration (§3b)
 and the hand-rolled CLI is built from them (the single-pass style —
 the dependencies, §6). The script is the first argument, so the
 flags exist before the pass (and the help text) happens; flag values
@@ -503,11 +504,11 @@ question for engine outputs.
   first fix, if its edges are ragged, is 4× supersampling with a
   Lanczos downscale.
 - **The engine runs on mlua's safe standard-library subset:**
-  parameter introspection is a table read of the script's `arguments`
-  declaration (§3b), so no `debug` library is needed — and `package`
-  (for `require`) is in the safe set. Isolation from the base
-  libraries (`os`, `io`, `debug`) comes from the dedicated
-  environment (a fresh globals table), not the subset.
+  the script runs in the state's globals, extended with the op
+  table — the full standard library is available to it (`os`, `io`,
+  and `package` for `require`); the subset withholds only `debug`,
+  which introspection doesn't need (it's a table read of the
+  script's `ARGUMENTS` declaration, §3b).
 - **The resample happens once.** A layer is resampled to the run
   scale at the first op that needs it there (the `resize`, or the
   composite when the layer is still at its file scale), so no path

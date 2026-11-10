@@ -24,9 +24,7 @@ impl Engine {
             .map_err(|error| anywho!("failed to read {}: {error}", script.display()))?;
 
         let lua = Lua::new();
-
-        let env = lua.create_table()?;
-        env.set("_G", env.clone())?;
+        let env = lua.globals();
 
         let script_dir = script
             .parent()
@@ -39,11 +37,17 @@ impl Engine {
         text::install(&lua, &env, scale)?;
         stream::install(&lua, &env, scale)?;
 
-        let chunk = lua
-            .load(source)
-            .set_name(script.display().to_string())
-            .set_environment(env.clone());
+        let package: Table = env.get("package")?;
+        let existing: String = package.get("path")?;
+        let path = format!(
+            "{};{};{}",
+            script_dir.join("?.lua").display(),
+            script_dir.join("?/init.lua").display(),
+            existing
+        );
+        package.set("path", path)?;
 
+        let chunk = lua.load(source).set_name(script.display().to_string());
         chunk.call::<()>(())?;
 
         let render: Function = env.get("render").map_err(|_| {
@@ -140,9 +144,9 @@ fn default_output(script: &Path) -> PathBuf {
 }
 
 fn arguments(script: &Path, env: &Table) -> anywho::Result<Vec<String>> {
-    let arguments: Option<Table> = env.get("arguments").map_err(|error| {
+    let arguments: Option<Table> = env.get("ARGUMENTS").map_err(|error| {
         anywho!(
-            "script {}: 'arguments' must be a table ({error})",
+            "script {}: 'ARGUMENTS' must be a table ({error})",
             script.display()
         )
     })?;
@@ -164,7 +168,7 @@ fn arguments(script: &Path, env: &Table) -> anywho::Result<Vec<String>> {
             Ok(name) => names.push(name),
             Err(error) => {
                 return Err(anywho!(
-                    "script {}: 'arguments' entry {} must be a string ({error})",
+                    "script {}: 'ARGUMENTS' entry {} must be a string ({error})",
                     i + 1,
                     script.display()
                 ));
@@ -210,7 +214,7 @@ end
         let (engine, _path) = load_script(
             "with-args",
             r#"
-arguments = {"id", "title"}
+ARGUMENTS = { "id", "title" }
 function render(args)
 end
 "#,
@@ -227,7 +231,7 @@ end
         std::fs::write(
             &path,
             r#"
-arguments = "nope"
+ARGUMENTS = "nope"
 function render(args)
 end
 "#,
@@ -249,7 +253,7 @@ end
         std::fs::write(
             &path,
             r#"
-arguments = {"output"}
+ARGUMENTS = { "output" }
 function render(args)
 end
 "#,
@@ -260,6 +264,27 @@ end
             Err(error) => error.to_string(),
         };
         assert!(error.contains("reserved argument name"));
+    }
+
+    #[test]
+    fn the_require_resolves_against_the_script_directory() {
+        let dir =
+            std::env::temp_dir().join(format!("pikke-engine-test-{}-require", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.lua"), "return { id = \"config\" }\n").unwrap();
+        let path = dir.join("script.lua");
+        std::fs::write(
+            &path,
+            r#"
+required = (require "config").id
+function render(args)
+end
+"#,
+        )
+        .unwrap();
+        let engine = Engine::load(&path, Scale::default()).unwrap();
+        let required: String = engine.env.get("required").unwrap();
+        assert_eq!(required, "config");
     }
 
     #[test]
