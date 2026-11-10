@@ -224,6 +224,8 @@ impl OutlinePen for BboxPen {
 impl UserData for Text {
     fn add_fields<F: UserDataFields<Text>>(fields: &mut F) {
         fields.add_meta_field("__name", "Text");
+        fields.add_field_method_get("x", |_lua, this| -> mlua::Result<f32> { Ok(this.x) });
+        fields.add_field_method_get("y", |_lua, this| -> mlua::Result<f32> { Ok(this.y) });
         fields.add_field_method_get("width", |_lua, this| -> mlua::Result<f32> {
             Ok(this.viewport.logical_width())
         });

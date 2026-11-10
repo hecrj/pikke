@@ -104,6 +104,8 @@ change is a script edit; an op-behavior change is an engine edit.
 
 | op | signature | meaning |
 |---|---|---|
+| `x` | `text.x → number` | The ink box's x in logical px. |
+| `y` | `text.y → number` | The ink box's y in logical px. |
 | `width` | `text.width → number` | The ink box's width in logical px. |
 | `height` | `text.height → number` | The ink box's height in logical px. |
 | `bounds` | `text.bounds → Rectangle` | The tight ink box at the laid-out position. |
