@@ -54,6 +54,23 @@ impl Image {
         })
     }
 
+    pub fn blank(width: f32, height: f32, paint: Color, scale: Scale) -> Result<Self> {
+        let viewport = Viewport::from_logical(width, height, scale)?;
+        let count = viewport.total_pixels();
+        let paint = paint.premultiply();
+
+        Ok(Self {
+            buffer: Arc::new(Buffer {
+                r: vec![paint.r; count],
+                g: vec![paint.g; count],
+                b: vec![paint.b; count],
+                a: vec![paint.a; count],
+            }),
+            viewport,
+            target_scale: scale,
+        })
+    }
+
     pub fn width(&self) -> u16 {
         self.viewport.width()
     }
@@ -580,8 +597,8 @@ impl OutlinePen for PathPen {
     }
 }
 
-fn paint_from_hex(color: &str) -> mlua::Result<Color> {
-    let message = || format!("fill: {color} is not a #RRGGBB hex color");
+fn paint_from_hex(operation: &str, color: &str) -> mlua::Result<Color> {
+    let message = || format!("{operation}: {color} is not a #RRGGBB hex color");
     let digits = color
         .strip_prefix('#')
         .filter(|digits| digits.len() == 6)
@@ -707,7 +724,7 @@ impl UserData for Image {
         methods.add_method_mut(
             "fill",
             |_lua, this, (region, color): (AnyUserData, String)| -> mlua::Result<()> {
-                let paint = paint_from_hex(&color)?;
+                let paint = paint_from_hex("fill", &color)?;
                 match region.borrow::<Rectangle>() {
                     Ok(region) => {
                         this.fill(*region, paint);
@@ -744,6 +761,38 @@ pub fn install(lua: &Lua, env: &Table, script_dir: &Path, scale: Scale) -> anywh
                 .map_err(|error| mlua::Error::RuntimeError(error.to_string()))
         })?,
     )?;
+    env.set(
+        "blank",
+        lua.create_function(move |_lua, opts: Table| -> mlua::Result<Image> {
+            let width: Option<f32> = opts.get("width")?;
+            let height: Option<f32> = opts.get("height")?;
+            let color: Option<String> = opts.get("color")?;
+
+            let width = width
+                .ok_or_else(|| mlua::Error::RuntimeError("blank: needs 'width'".to_owned()))?;
+            let height = height
+                .ok_or_else(|| mlua::Error::RuntimeError("blank: needs 'height'".to_owned()))?;
+            let color = color
+                .ok_or_else(|| mlua::Error::RuntimeError("blank: needs 'color'".to_owned()))?;
+
+            if width <= 0.0 || !width.is_finite() {
+                return Err(mlua::Error::RuntimeError(
+                    "blank: 'width' must be a positive number".to_owned(),
+                ));
+            }
+
+            if height <= 0.0 || !height.is_finite() {
+                return Err(mlua::Error::RuntimeError(
+                    "blank: 'height' must be a positive number".to_owned(),
+                ));
+            }
+
+            let paint = paint_from_hex("blank", &color)?;
+
+            Image::blank(width, height, paint, scale)
+                .map_err(|error| mlua::Error::RuntimeError(error.to_string()))
+        })?,
+    )?;
     Ok(())
 }
 
@@ -752,9 +801,9 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
 
-    use mlua::Lua;
+    use mlua::{AnyUserData, Function, Lua, Table};
 
-    use super::{Buffer, Filter, Image, Mode, load};
+    use super::{Buffer, Filter, Image, Mode, install, load};
     use crate::color::{Color, Space, luma_linear};
     use crate::text::Text;
     use crate::{Rectangle, Result, Scale, Viewport};
@@ -783,6 +832,96 @@ mod tests {
         ] {
             assert_eq!(plane.len(), count);
         }
+    }
+
+    #[test]
+    fn the_blank_paints_the_whole_canvas() -> Result<()> {
+        let paint = Color::from_rgba_u8([200, 30, 60, 255]).srgb_to_linear();
+        let image = Image::blank(4.0, 2.0, paint, Scale::default())?;
+
+        assert_eq!((image.width(), image.height()), (4, 2));
+        for pixel in image.to_rgba8().chunks(4) {
+            assert_eq!(pixel, &[200, 30, 60, 255]);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn the_blank_sizes_its_buffer_at_the_run_scale() -> Result<()> {
+        let paint = Color::from_rgba_u8([255, 255, 255, 255]).srgb_to_linear();
+        let image = Image::blank(300.0, 100.0, paint, Scale::new(0.5))?;
+
+        assert_eq!((image.width(), image.height()), (150, 50));
+        assert_eq!(image.buffer.r.len(), 150 * 50);
+        assert_eq!(
+            (image.logical_width(), image.logical_height()),
+            (300.0, 100.0)
+        );
+
+        Ok(())
+    }
+
+    fn installed_blank(scale: Scale) -> (Lua, Function) {
+        let lua = Lua::new();
+        let env = lua.create_table().unwrap();
+        let script_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        install(&lua, &env, script_dir, scale).unwrap();
+        let blank: Function = env.get("blank").unwrap();
+        (lua, blank)
+    }
+
+    #[test]
+    fn the_blank_binding_paints_and_validates_its_arguments() -> Result<()> {
+        let (lua, blank) = installed_blank(Scale::default());
+
+        let opts = lua.create_table().unwrap();
+        opts.set("width", 4).unwrap();
+        opts.set("height", 2).unwrap();
+        opts.set("color", "#C81E3C").unwrap();
+        let userdata: AnyUserData = blank.call(opts).unwrap();
+        let image = userdata.borrow::<Image>().unwrap().clone();
+        assert_eq!((image.width(), image.height()), (4, 2));
+        for pixel in image.to_rgba8().chunks(4) {
+            assert_eq!(pixel, &[200, 30, 60, 255]);
+        }
+
+        let error = |opts: Table| blank.call::<AnyUserData>(opts).unwrap_err().to_string();
+
+        let opts = lua.create_table().unwrap();
+        opts.set("height", 2).unwrap();
+        opts.set("color", "#C81E3C").unwrap();
+        assert!(error(opts).contains("blank: needs 'width'"));
+
+        let opts = lua.create_table().unwrap();
+        opts.set("width", 4).unwrap();
+        opts.set("color", "#C81E3C").unwrap();
+        assert!(error(opts).contains("blank: needs 'height'"));
+
+        let opts = lua.create_table().unwrap();
+        opts.set("width", 4).unwrap();
+        opts.set("height", 2).unwrap();
+        assert!(error(opts).contains("blank: needs 'color'"));
+
+        let opts = lua.create_table().unwrap();
+        opts.set("width", 0.0).unwrap();
+        opts.set("height", 2).unwrap();
+        opts.set("color", "#C81E3C").unwrap();
+        assert!(error(opts).contains("blank: 'width' must be a positive number"));
+
+        let opts = lua.create_table().unwrap();
+        opts.set("width", 4).unwrap();
+        opts.set("height", -2).unwrap();
+        opts.set("color", "#C81E3C").unwrap();
+        assert!(error(opts).contains("blank: 'height' must be a positive number"));
+
+        let opts = lua.create_table().unwrap();
+        opts.set("width", 4).unwrap();
+        opts.set("height", 2).unwrap();
+        opts.set("color", "C81E3C").unwrap();
+        assert!(error(opts).contains("not a #RRGGBB hex color"));
+
+        Ok(())
     }
 
     #[test]
@@ -1406,7 +1545,7 @@ mod tests {
     fn register_vendored_font() {
         let lua = Lua::new();
         let env = lua.create_table().unwrap();
-        let script_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fonts");
+        let script_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts");
         crate::font::install(&lua, &env, &script_dir).unwrap();
         let font: mlua::Function = env.get("font").unwrap();
         font.call::<mlua::AnyUserData>("NotoSans-Regular.ttf")

@@ -16,8 +16,10 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub fn load(script: impl AsRef<Path>) -> anywho::Result<Engine> {
+    pub fn load(script: impl AsRef<Path>, scale: impl Into<Scale>) -> anywho::Result<Engine> {
         let script = script.as_ref().to_path_buf();
+        let scale = scale.into();
+
         let source = std::fs::read_to_string(&script)
             .map_err(|error| anywho!("failed to read {}: {error}", script.display()))?;
 
@@ -25,6 +27,17 @@ impl Engine {
 
         let env = lua.create_table()?;
         env.set("_G", env.clone())?;
+
+        let script_dir = script
+            .parent()
+            .map(|dir| dir.to_path_buf())
+            .unwrap_or_default();
+
+        image::install(&lua, &env, &script_dir, scale)?;
+        font::install(&lua, &env, &script_dir)?;
+        rectangle::install(&lua, &env)?;
+        text::install(&lua, &env, scale)?;
+        stream::install(&lua, &env, scale)?;
 
         let chunk = lua
             .load(source)
@@ -59,25 +72,7 @@ impl Engine {
         &self.arguments
     }
 
-    pub fn run(
-        &self,
-        scale: impl Into<Scale>,
-        params: &[(String, Option<String>)],
-    ) -> anywho::Result<()> {
-        let scale = scale.into();
-
-        let script_dir = self
-            .script
-            .parent()
-            .map(|dir| dir.to_path_buf())
-            .unwrap_or_default();
-
-        image::install(&self.lua, &self.env, &script_dir, scale)?;
-        font::install(&self.lua, &self.env, &script_dir)?;
-        rectangle::install(&self.lua, &self.env)?;
-        text::install(&self.lua, &self.env, scale)?;
-        stream::install(&self.lua, &self.env, scale)?;
-
+    pub fn run(&self, params: &[(String, Option<String>)]) -> anywho::Result<()> {
         let frames = Rc::new(RefCell::new(Vec::new()));
         let yielded = frames.clone();
 
@@ -101,7 +96,6 @@ impl Engine {
         )?;
 
         let args = self.lua.create_table()?;
-        args.set("scale", f32::from(scale))?;
 
         for (name, value) in params {
             args.set(name.as_str(), value.clone())?;
@@ -130,9 +124,16 @@ impl Engine {
 }
 
 fn arguments(script: &Path, env: &Table) -> anywho::Result<Vec<String>> {
-    let arguments: Table = env
-        .get("arguments")
-        .map_err(|_| anywho!("script {}: 'arguments' is missing", script.display()))?;
+    let arguments: Option<Table> = env.get("arguments").map_err(|error| {
+        anywho!(
+            "script {}: 'arguments' must be a table ({error})",
+            script.display()
+        )
+    })?;
+
+    let Some(arguments) = arguments else {
+        return Ok(Vec::new());
+    };
 
     let mut names = Vec::new();
 
@@ -156,4 +157,69 @@ fn arguments(script: &Path, env: &Table) -> anywho::Result<Vec<String>> {
     }
 
     Ok(names)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Engine, Scale};
+
+    use std::io::Write;
+
+    fn load_script(name: &str, source: &str) -> (Engine, std::path::PathBuf) {
+        let dir =
+            std::env::temp_dir().join(format!("pikke-engine-test-{}-{}", std::process::id(), name));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("script.lua");
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(source.as_bytes()).unwrap();
+        drop(file);
+        (Engine::load(&path, Scale::default()).unwrap(), path)
+    }
+
+    #[test]
+    fn the_load_defaults_a_missing_arguments_to_empty() {
+        let (engine, _path) = load_script(
+            "no-args",
+            r#"
+function render(args)
+end
+"#,
+        );
+        assert!(engine.arguments().is_empty());
+    }
+
+    #[test]
+    fn the_load_reads_the_declared_arguments() {
+        let (engine, _path) = load_script(
+            "with-args",
+            r#"
+arguments = {"id", "title"}
+function render(args)
+end
+"#,
+        );
+        assert_eq!(engine.arguments(), &["id".to_string(), "title".to_string()]);
+    }
+
+    #[test]
+    fn the_load_rejects_a_non_table_arguments() {
+        let dir =
+            std::env::temp_dir().join(format!("pikke-engine-test-{}-bad", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("script.lua");
+        std::fs::write(
+            &path,
+            r#"
+arguments = "nope"
+function render(args)
+end
+"#,
+        )
+        .unwrap();
+        let error = match Engine::load(&path, Scale::default()) {
+            Ok(_) => panic!("expected a load error"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("must be a table"));
+    }
 }

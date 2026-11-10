@@ -67,7 +67,7 @@ mod tests {
     }
 
     fn fonts_dir() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fonts")
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts")
     }
 
     #[test]

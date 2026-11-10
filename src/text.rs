@@ -352,7 +352,7 @@ mod tests {
     fn installed() -> (Lua, Table, Function, Function) {
         let lua = Lua::new();
         let env = lua.create_table().unwrap();
-        let script_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fonts");
+        let script_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts");
         font_install(&lua, &env, &script_dir).unwrap();
         install(&lua, &env, Scale::default()).unwrap();
         let font: Function = env.get("font").unwrap();

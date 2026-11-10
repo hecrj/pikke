@@ -37,18 +37,15 @@ fn main() -> anywho::Result<()> {
         std::process::exit(1);
     }
 
-    let engine = Engine::load(script)?;
+    let scale = {
+        let mut args = std::env::args();
 
-    let mut show_help = false;
-    let mut scale = 1.0;
-    let mut values = BTreeMap::new();
+        loop {
+            let Some(arg) = args.next() else {
+                break 1.0;
+            };
 
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--help" => {
-                show_help = true;
-            }
-            "--scale" => {
+            if arg == "--scale" {
                 let value = args
                     .next()
                     .ok_or_else(|| anywho!("--scale requires a value"))?;
@@ -63,7 +60,24 @@ fn main() -> anywho::Result<()> {
                     ));
                 }
 
-                scale = value;
+                break value;
+            }
+        }
+    };
+
+    let engine = Engine::load(script, scale)?;
+
+    let mut show_help = false;
+    let mut values = BTreeMap::new();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--help" => {
+                show_help = true;
+            }
+            "--scale" => {
+                // Already parsed
+                let _ = args.next();
             }
             argument if argument.starts_with('-') => {
                 let option = argument.trim_start_matches('-').to_owned();
@@ -116,7 +130,7 @@ fn main() -> anywho::Result<()> {
             .join(" ")
     );
 
-    engine.run(Scale::new(scale), &arguments)
+    engine.run(&arguments)
 }
 
 fn help(engine: Option<&Engine>) -> String {
