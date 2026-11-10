@@ -4,6 +4,7 @@ mod engine;
 mod error;
 mod font;
 mod image;
+mod path;
 mod rectangle;
 mod scale;
 mod stream;
@@ -12,13 +13,13 @@ mod video;
 mod viewport;
 
 use std::collections::BTreeMap;
-use std::path::Path;
 use std::process::ExitCode;
 
 pub use color::Color;
 pub use engine::Engine;
 pub use error::Error;
 pub use image::Image;
+pub use path::Path;
 pub use rectangle::Rectangle;
 pub use scale::Scale;
 pub use video::Video;
@@ -157,7 +158,7 @@ fn run() -> Result<()> {
             .join(" ")
     );
 
-    engine.run(&arguments, output.as_deref().map(Path::new))
+    engine.run(&arguments, output.as_deref().map(std::path::Path::new))
 }
 
 fn help(engine: Option<&Engine>) -> String {

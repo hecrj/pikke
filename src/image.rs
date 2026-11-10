@@ -1,5 +1,5 @@
 use std::io;
-use std::path::Path;
+use std::path;
 use std::sync::Arc;
 
 use image::{ColorType, ImageFormat};
@@ -14,7 +14,7 @@ use vello_cpu::{
 
 use crate::color::{Color, Filter, Space, crop, luma_linear, resize};
 use crate::text::Text;
-use crate::{Error, Rectangle, Result, Scale, Viewport};
+use crate::{Error, Path, Rectangle, Result, Scale, Viewport};
 
 #[derive(Clone, Debug)]
 pub struct Image {
@@ -285,30 +285,42 @@ impl Image {
         Ok(())
     }
 
-    pub fn fill(&mut self, region: Rectangle, paint: Color) {
-        let left = region.x;
-        let top = region.y;
-        let right = region.x + region.width;
-        let bottom = region.y + region.height;
-
-        if region.width <= 0.0 || region.height <= 0.0 {
-            return;
-        }
-
-        if !left.is_finite() || !top.is_finite() || !right.is_finite() || !bottom.is_finite() {
-            return;
-        }
-
+    pub fn fill<'a>(&mut self, fill: impl Into<Geometry<'a>>, paint: Color) {
         let mut resources = Resources::new();
         let mut context = RenderContext::new(self.width(), self.height());
         context.set_transform(Affine::scale(self.viewport.scale().into()));
         context.set_paint(AlphaColor::<Srgb>::BLACK);
-        context.fill_rect(&Rect::new(
-            left.into(),
-            top.into(),
-            right.into(),
-            bottom.into(),
-        ));
+
+        match fill.into() {
+            Geometry::Rectangle(region) => {
+                let left = region.x;
+                let top = region.y;
+                let right = region.x + region.width;
+                let bottom = region.y + region.height;
+
+                if region.width <= 0.0 || region.height <= 0.0 {
+                    return;
+                }
+
+                if !left.is_finite()
+                    || !top.is_finite()
+                    || !right.is_finite()
+                    || !bottom.is_finite()
+                {
+                    return;
+                }
+
+                context.fill_rect(&Rect::new(
+                    left.into(),
+                    top.into(),
+                    right.into(),
+                    bottom.into(),
+                ));
+            }
+            Geometry::Path(path) => {
+                context.fill_path(path.as_ref());
+            }
+        }
 
         let mut pixmap = Pixmap::new(self.width(), self.height());
         context.render(&mut pixmap, &mut resources);
@@ -499,7 +511,7 @@ impl Image {
         Ok(luma / ((right - left) * (bottom - top)) as f32 * 255.0)
     }
 
-    pub fn write(&self, output: &Path) -> Result<()> {
+    pub fn write(&self, output: &path::Path) -> Result<()> {
         let file_name = output.file_name().ok_or_else(|| {
             io::Error::other(format!("invalid output path: {}", output.display()))
         })?;
@@ -527,7 +539,25 @@ impl Image {
     }
 }
 
-fn load(path: &Path, target_scale: Scale) -> Result<Image> {
+#[derive(Debug, Clone)]
+pub enum Geometry<'a> {
+    Rectangle(Rectangle),
+    Path(&'a Path),
+}
+
+impl From<Rectangle> for Geometry<'_> {
+    fn from(rectangle: Rectangle) -> Self {
+        Self::Rectangle(rectangle)
+    }
+}
+
+impl<'a> From<&'a Path> for Geometry<'a> {
+    fn from(path: &'a Path) -> Self {
+        Self::Path(path)
+    }
+}
+
+fn load(path: &path::Path, target_scale: Scale) -> Result<Image> {
     let rgba = image::open(path)?.to_rgba8();
 
     let (width, height) = (rgba.width(), rgba.height());
@@ -731,21 +761,24 @@ impl UserData for Image {
             "fill",
             |_lua, this, (region, color): (AnyUserData, String)| -> mlua::Result<()> {
                 let paint = paint_from_hex("fill", &color)?;
-                match region.borrow::<Rectangle>() {
-                    Ok(region) => {
-                        this.fill(*region, paint);
-                        Ok(())
-                    }
-                    Err(_) => {
-                        let text = region.borrow::<Text>().map_err(|_| {
-                            mlua::Error::RuntimeError(
-                                "fill: the region must be a `Rectangle` or a `Text`".to_owned(),
-                            )
-                        })?;
-                        this.fill_text(&text, paint)?;
-                        Ok(())
-                    }
+
+                if let Ok(rectangle) = region.borrow::<Rectangle>() {
+                    this.fill(*rectangle, paint);
+                    return Ok(());
                 }
+
+                if let Ok(text) = region.borrow::<Text>() {
+                    this.fill_text(&text, paint)?;
+                    return Ok(());
+                }
+
+                let path = region.borrow::<crate::Path>().map_err(|_| {
+                    mlua::Error::RuntimeError(
+                        "fill: the region must be a `Rectangle`, a `Text`, or a `Path`".to_owned(),
+                    )
+                })?;
+                this.fill(Geometry::Path(&path), paint);
+                Ok(())
             },
         );
         methods.add_method(
@@ -758,8 +791,9 @@ impl UserData for Image {
     }
 }
 
-pub fn install(lua: &Lua, env: &Table, script_dir: &Path, scale: Scale) -> Result<()> {
+pub fn install(lua: &Lua, env: &Table, script_dir: &path::Path, scale: Scale) -> Result<()> {
     let script_dir = script_dir.to_path_buf();
+
     env.set(
         "image",
         lua.create_function(move |_lua, path: String| -> mlua::Result<Image> {
@@ -1493,6 +1527,52 @@ mod tests {
     }
 
     #[test]
+    fn the_fill_path_paints_the_aligned_path_exactly() -> Result<()> {
+        let mut image = Image::new(Scale::default(), 10.0, 10.0, Color::TRANSPARENT)?;
+        let paint = Color::from_rgba_u8([255, 255, 255, 255]).srgb_to_linear();
+
+        let mut path = crate::path::Path::new();
+        path.move_to(2.0, 2.0);
+        path.line_to(6.0, 2.0);
+        path.line_to(6.0, 6.0);
+        path.line_to(2.0, 6.0);
+        path.close();
+        image.fill(&path, paint);
+
+        let painted = image.to_rgba8();
+        let pixel = |x: usize, y: usize| {
+            let i = (y * 10 + x) * 4;
+            painted[i..i + 4].to_vec()
+        };
+
+        assert_eq!(pixel(2, 2), vec![255, 255, 255, 255]);
+        assert_eq!(pixel(5, 5), vec![255, 255, 255, 255]);
+        assert_eq!(pixel(6, 4), vec![0, 0, 0, 0]);
+        assert_eq!(pixel(0, 0), vec![0, 0, 0, 0]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn the_fill_path_is_a_no_op_for_degenerate_paths() -> Result<()> {
+        let mut image = Image::new(Scale::default(), 4.0, 4.0, Color::TRANSPARENT)?;
+        let paint = Color::from_rgba_u8([255, 255, 255, 255]).srgb_to_linear();
+
+        image.fill(&crate::path::Path::new(), paint);
+
+        let mut non_finite = crate::path::Path::new();
+        non_finite.move_to(f32::INFINITY, 0.0);
+        non_finite.line_to(0.0, f32::NAN);
+        non_finite.close();
+        image.fill(&non_finite, paint);
+
+        let painted = image.to_rgba8();
+        assert!(painted.iter().all(|&byte| byte == 0));
+
+        Ok(())
+    }
+
+    #[test]
     fn the_fill_binding_validates_its_arguments() -> Result<()> {
         let lua = Lua::new();
         let image = Image::new(Scale::default(), 4.0, 4.0, Color::TRANSPARENT)?;
@@ -1534,7 +1614,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("the region must be a `Rectangle` or a `Text`")
+                .contains("the region must be a `Rectangle`, a `Text`, or a `Path`")
         );
 
         lua.load("output:fill(text, \"#000000\")")

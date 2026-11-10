@@ -140,8 +140,11 @@ record where they occur and folded back into DESIGN.md later:
   with the pinned `over` — a paint span is sub-pixel geometry, so the
   geometry-rounding clause does not apply to it. A `Text` region is
   painted by `fill` (the skrifa outlines → the vello raster, §7)
-  with its ink's top-left pinned exactly to `(x, y)`. A
-  non-finite or non-positive span paints nothing. Image dims are
+  with its ink's top-left pinned exactly to `(x, y)`. A `Path`
+  region — the `path` op's recorded subpaths — is painted by the
+  same vello raster and the span's linear composite. A
+  non-finite or non-positive span paints nothing, nor does an empty
+  or non-finite path. Image dims are
   capped at 65535 physical px (the rasterizer's surface bound).
 - **Geometry rounding:** positions, sizes and resize targets are real
   px; every geometric result — and the logical → physical transform

@@ -82,6 +82,7 @@ change is a script edit; an op-behavior change is an engine edit.
 | `font` | `font(path) → Font` | Load a font (path resolved against the script's base); used by `text`. |
 | `stream` | `stream(program, args) → Stream` | Run an external frame producer (`args`: an array of strings/numbers, numbers rendered for the command line). Returns a **lazy** stream of `Image` frames. |
 | `rectangle` | `rectangle({x, y, size}) → Rectangle` | A rect; `x`/`y` top-left (px), `size` a scalar (w=h) or `{w, h}`. |
+| `path` | `path() → Path` | An empty path (logical px); painted by `fill`. |
 | `text` | `text(str, {font, size, weight, x, y}) → Text` | Lay out a string; the ink box's top-left at `x`/`y` (default 0). `size`: px. `weight`: font weight (default 400). Painted by `fill`. |
 
 ### Image fields and methods
@@ -92,7 +93,7 @@ change is a script edit; an op-behavior change is an engine edit.
 | `autocontrast` | `img:autocontrast()` | Histogram-stretch to full range, **tone-preserving** (no highlight/shadow clip). In place. |
 | `resize` | `img:resize({width, height, mode, filter})` | Scale to the target (logical px): exactly one of `width`/`height` — aspect preserved; both — the target box, `mode = "cover"` covers it and center-crops, no `mode` scales to it exactly; `filter = "lanczos"` or `"cubic"` (default). In place. |
 | `blend` | `img:blend(other, {at, color_space})` | Alpha-composite `other` over `img`, `other`'s top-left at `at` (a `Rectangle`, default `(0, 0)`), clipped to the receiver. `color_space`: `"linear"` (default) / `"srgb"`. In place. |
-| `fill` | `img:fill(region, color)` | Paint `region` (a `Rectangle` or `Text`) with `color` (hex). The space is chosen by the region's kind: a `Text` region composites in sRGB, a `Rectangle` region in linear. In place. |
+| `fill` | `img:fill(region, color)` | Paint `region` (a `Rectangle`, `Text`, or `Path`) with `color` (hex). The space is chosen by the region's kind: a `Text` region composites in sRGB, a `Rectangle` or `Path` region in linear. In place. |
 | `luma_in` | `img:luma_in(region) → number` | Mean luma of `region` (a `Rectangle`), 0–255 (see *Luma*). |
 | `width` | `img.width → number` | The image's width in logical px. |
 | `height` | `img.height → number` | The image's height in logical px. |
@@ -100,7 +101,7 @@ change is a script edit; an op-behavior change is an engine edit.
 | `physical_height` | `img.physical_height → number` | The image's height in physical px (the run scale). |
 | `size` | `img.size → {w, h}` | The image's logical dims as a `{w, h}` pair — a convenience for `rectangle`'s `size`. |
 
-### Text and Rectangle
+### Text, Rectangle, and Path
 
 | op | signature | meaning |
 |---|---|---|
@@ -111,6 +112,9 @@ change is a script edit; an op-behavior change is an engine edit.
 | `bounds` | `text.bounds → Rectangle` | The tight ink box at the laid-out position. |
 | `translate` | `text:translate({x, y})` | Move the ink box by a logical offset. In place. |
 | `padded` | `rectangle:padded(n) → Rectangle` | The rect grown by `n` px on all sides; `padded({vertical, horizontal})` grows top/bottom and left/right; `padded({left, top, right, bottom})` grows each side (a missing side is 0). |
+| `move_to` | `path:move_to({x, y})` | Start a subpath at a logical point (`x`/`y` default 0). In place. |
+| `line_to` | `path:line_to({x, y})` | Extend the current subpath with a straight line to a logical point (`x`/`y` default 0). In place. |
+| `close` | `path:close()` | Close the current subpath. In place. |
 
 ### Output
 
@@ -134,8 +138,8 @@ change is a script edit; an op-behavior change is an engine edit.
 
 - **`blend` defaults to linear light; `fill` chooses by the region's
   kind** — a `Text` region composites in sRGB (text is sRGB, always),
-  a `Rectangle` region in linear. For proper color handling, artwork
-  composites in linear light by default. The buffer holds
+  a `Rectangle` or `Path` region in linear. For proper color handling,
+  artwork composites in linear light by default. The buffer holds
   **premultiplied** RGBA in linear light (0–1): the linear composite
   is `layer + base·(1 − layer.a)` — no division, and a 0 or 1 alpha
   on either side falls out of the formula exactly. A fully

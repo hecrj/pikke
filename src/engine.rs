@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use mlua::{AnyUserData, Function, Lua, Table};
 
-use crate::{Error, Image, Result, Scale, Video, font, image, rectangle, stream, text};
+use crate::{Error, Image, Result, Scale, Video, font, image, path, rectangle, stream, text};
 
 pub struct Engine {
     script: PathBuf,
@@ -34,6 +34,7 @@ impl Engine {
         image::install(&lua, &env, &script_dir, scale)?;
         font::install(&lua, &env, &script_dir)?;
         rectangle::install(&lua, &env)?;
+        path::install(&lua, &env)?;
         text::install(&lua, &env, scale)?;
         stream::install(&lua, &env, scale)?;
 
