@@ -217,8 +217,9 @@ record where they occur and folded back into DESIGN.md later:
 - **Outputs:** in the working directory, named after the script —
   `hello.lua` → `hello.png` / `hello.mp4`; `--output <path>`
   overrides the path. The engine does not know the kind in advance:
-  frame 1 is held, and frame 2's arrival starts the MP4 path
-  (flushing frame 1 into the encoder). One yielded frame → the PNG.
+  the first frame is always written as a PNG, and frame 2's arrival
+  starts the MP4 path (flushing frame 1 into the encoder). One
+  yielded frame → the PNG alone; a sequence → the PNG and the MP4.
   All frames share frame 1's dims (`yield`'s invariant, §3b), so the
   encoder's size is fixed at frame 1.
 - **PNG:** RGBA — the buffer's alpha as-is, no need to drop it (the
@@ -474,11 +475,12 @@ With the GPU: one real still (a frame producer through a minimal
 stream's frame byte-for-byte (no free op between them).
 
 **Phase 9 — the encoder.** The PNG writer (RGBA, atomic) and the
-ffmpeg MP4 pipe (the default flags, §5); the PNG/MP4 decision at
-frame 2 (§5) replaces the Phase 2 yield recorder.
+ffmpeg MP4 pipe (the default flags, §5); the always-PNG first frame
+and frame 2's start of the MP4 (§5) replace the Phase 2 yield
+recorder.
 *Gate:* one frame → `<script>.png` decoding back to the frame
-byte-for-byte (lossless); N frames → `<script>.mp4` with N frames
-(ffprobe).
+byte-for-byte (lossless); N frames → the first frame's
+`<script>.png` and `<script>.mp4` with N frames (ffprobe).
 
 **Phase 10 — the example design, end to end.** Run the example
 design at a run scale: `pikke <script> --scale 0.5 <params>` (the
@@ -530,4 +532,4 @@ question for engine outputs.
 
 The phase ladder is settled (§7); the next working step is Phase 9
 (the encoder: the PNG writer, the ffmpeg MP4 pipe, and the
-PNG/MP4 decision at frame 2).
+always-PNG first frame).

@@ -7,6 +7,7 @@ Inspired by [GEGL](https://gitlab.gnome.org/GNOME/gegl).
 against a fixed table of **ops** on a pixel buffer with one canonical
 form (linear light, premultiplied, f32). A composition emits a
 **sequence of frames** — one frame is a still image, many are a video.
+
 This document specifies the engine's design — the op API, the
 execution model, the color-space and units conventions, and the
 invariants (correctness and determinism, not byte-exactness) — in a
@@ -113,7 +114,7 @@ change is a script edit; an op-behavior change is an engine edit.
 
 | op | signature | meaning |
 |---|---|---|
-| `yield` | `yield(frame)` | Emit one frame. The composition's frame sequence is the output: one frame is a still (a PNG), a sequence a video (an MP4). All frames of a run share the first frame's dims — the engine asserts it. |
+| `yield` | `yield(frame)` | Emit one frame. The composition's frame sequence is the output: one frame is a still (a PNG), a sequence a video (an MP4); the first frame is always written as a PNG. All frames of a run share the first frame's dims — the engine asserts it. |
 
 ## Execution model
 
@@ -126,10 +127,6 @@ change is a script edit; an op-behavior change is an engine edit.
 - **Streaming.** `stream` is lazy. The `for` loop over it is the
   sole driver: the engine produces exactly one frame per iteration,
   on demand. Nothing else advances the stream.
-- **Prefix / suffix split.** Ops before `stream` (the `base`) run
-  **once**; ops inside the loop run **per frame**, each starting from
-  a fresh `clone()` of `base`, never accumulated across frames.
-  `yield` emits the frame at the loop's end.
 
 ## Color space
 
