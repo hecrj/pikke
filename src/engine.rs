@@ -307,7 +307,7 @@ end
 
     #[test]
     fn the_yield_rejects_a_frame_at_other_dims() {
-        let (engine, _path) = load_script(
+        let (engine, path) = load_script(
             "yield-dims",
             r#"
 function render(args)
@@ -319,7 +319,7 @@ end
 
         let params: &[(String, Option<String>)] = &[];
 
-        let error = match engine.run(params, None) {
+        let error = match engine.run(params, Some(&path.with_extension("png"))) {
             Ok(()) => panic!("expected a run error"),
             Err(error) => error.to_string(),
         };
