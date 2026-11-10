@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use anywho::anywho;
 use mlua::{AnyUserData, Function, Lua, Table};
 
-use crate::{Image, Scale, font, image, rectangle, stream, text};
+use crate::{Image, Scale, Video, font, image, rectangle, stream, text};
 
 pub struct Engine {
     script: PathBuf,
@@ -80,14 +80,21 @@ impl Engine {
         output: Option<&Path>,
     ) -> anywho::Result<()> {
         let script = self.script.clone();
-        let output = output.map(Path::to_path_buf);
+
+        let output = output
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| default_output(&script));
+        let video = output.with_extension("mp4");
+
         let mut frame_number = 0;
         let mut dimensions = None;
+
+        self.lua.set_app_data(Video::new(&video));
 
         self.env.set(
             "yield",
             self.lua
-                .create_function_mut(move |_lua, frame: AnyUserData| -> mlua::Result<()> {
+                .create_function_mut(move |lua, frame: AnyUserData| -> mlua::Result<()> {
                     frame_number += 1;
 
                     let frame = frame.borrow::<Image>()?;
@@ -112,11 +119,19 @@ impl Engine {
                     if frame_number == 1 {
                         dimensions = Some((frame.width(), frame.height()));
 
-                        let output = output.clone().unwrap_or_else(|| default_output(&script));
                         frame.write(&output)?;
-                    } else {
-                        // TODO: Phase 9 - start ffmpeg and feed RGBA data
+
+                        eprintln!(
+                            "output: {} ({}×{})",
+                            output.display(),
+                            frame.width(),
+                            frame.height()
+                        );
                     }
+
+                    lua.app_data_mut::<Video>()
+                        .expect("video type must be set")
+                        .push(&frame)?;
 
                     Ok(())
                 })?,
@@ -129,6 +144,16 @@ impl Engine {
         }
 
         self.render.call::<()>(args)?;
+
+        let frames = self
+            .lua
+            .remove_app_data::<Video>()
+            .expect("video type must be set")
+            .finish()?;
+
+        if frames > 1 {
+            eprintln!("output: {} ({frames} frames)", video.display());
+        }
 
         Ok(())
     }
@@ -307,6 +332,82 @@ end
         assert!(error.contains("yield"), "{error}");
         assert!(error.contains("20×10"), "{error}");
         assert!(error.contains("10×10"), "{error}");
+    }
+
+    fn packets(path: &std::path::Path) -> u32 {
+        let out = std::process::Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-count_packets",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=nb_read_packets",
+                "-of",
+                "default=nw=1:nk=1",
+            ])
+            .arg(path)
+            .output()
+            .unwrap();
+        let out = String::from_utf8_lossy(&out.stdout);
+
+        out.trim().parse().unwrap()
+    }
+
+    #[test]
+    fn the_run_yields_a_still() {
+        let (engine, _path) = load_script(
+            "still",
+            r##"
+function render(args)
+  yield(blank({ width = 10, height = 10, color = "#FF0000" }))
+end
+"##,
+        );
+
+        let dir =
+            std::env::temp_dir().join(format!("pikke-engine-test-{}-still", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let output = dir.join("still.png");
+
+        let params: &[(String, Option<String>)] = &[];
+
+        engine.run(params, Some(&output)).unwrap();
+
+        let rgba: Vec<u8> = image::open(&output).unwrap().to_rgba8().into_raw();
+        assert_eq!(rgba, [255, 0, 0, 255].repeat(100));
+        assert!(!dir.join("still.mp4").exists());
+    }
+
+    #[test]
+    fn the_run_yields_a_video() {
+        let (engine, _path) = load_script(
+            "video",
+            r##"
+function render(args)
+  for i = 1, 3 do
+    yield(blank({ width = 16, height = 16, color = "#00FF00" }))
+  end
+end
+"##,
+        );
+
+        let dir =
+            std::env::temp_dir().join(format!("pikke-engine-test-{}-video", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let params: &[(String, Option<String>)] = &[];
+
+        engine.run(params, Some(&dir.join("video.png"))).unwrap();
+
+        let rgba: Vec<u8> = image::open(dir.join("video.png"))
+            .unwrap()
+            .to_rgba8()
+            .into_raw();
+        assert_eq!(rgba, [0, 255, 0, 255].repeat(256));
+        assert_eq!(packets(&dir.join("video.mp4")), 3);
+        assert!(!dir.join("video.mp4.tmp").exists());
     }
 
     #[test]

@@ -216,7 +216,8 @@ record where they occur and folded back into DESIGN.md later:
   derived physical.
 - **Outputs:** in the working directory, named after the script —
   `hello.lua` → `hello.png` / `hello.mp4`; `--output <path>`
-  overrides the path. The engine does not know the kind in advance:
+  overrides the still's path (the video is the same path as
+  `.mp4`). The engine does not know the kind in advance:
   the first frame is always written as a PNG, and frame 2's arrival
   starts the MP4 path (flushing frame 1 into the encoder). One
   yielded frame → the PNG alone; a sequence → the PNG and the MP4.
@@ -474,11 +475,12 @@ With the GPU: one real still (a frame producer through a minimal
 `background:blend(frame)` script) — the yielded frame equals the raw
 stream's frame byte-for-byte (no free op between them).
 
-**Phase 9 — the encoder.** The PNG writer (RGBA, atomic) and the
-ffmpeg MP4 pipe (the default flags, §5); the always-PNG first frame
-and frame 2's start of the MP4 (§5) replace the Phase 2 yield
-recorder.
-*Gate:* one frame → `<script>.png` decoding back to the frame
+**Phase 9 — the encoder (done).** The `Video`: the always-PNG first
+frame (the PNG writer — RGBA, atomic) and the ffmpeg MP4 pipe from
+frame 2 (the default flags, §5), driven by a worker thread over a
+bounded channel (backpressure; the RGBA transfer is off the
+script's thread); the even-dims precheck guards yuv420p.
+*Gate (met):* one frame → `<script>.png` decoding back to the frame
 byte-for-byte (lossless); N frames → the first frame's
 `<script>.png` and `<script>.mp4` with N frames (ffprobe).
 
@@ -530,6 +532,5 @@ question for engine outputs.
 
 ## 9. Next
 
-The phase ladder is settled (§7); the next working step is Phase 9
-(the encoder: the PNG writer, the ffmpeg MP4 pipe, and the
-always-PNG first frame).
+The phase ladder is settled (§7); the next working step is Phase 10
+(the example design, end to end, at `--scale 0.5`).

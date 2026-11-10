@@ -8,6 +8,8 @@ pub enum Error {
     IntegerOutOfRange(#[from] num::TryFromIntError),
     #[error("invalid dimensions {width}x{height}")]
     InvalidDimensions { width: u16, height: u16 },
+    #[error("the video requires even dimensions: {width}x{height}")]
+    OddDimensions { width: u16, height: u16 },
     #[error("invalid pixel data {width}x{height}: expected {expected} bytes, got {got}")]
     InvalidPixelData {
         width: u16,

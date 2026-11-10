@@ -8,6 +8,7 @@ mod rectangle;
 mod scale;
 mod stream;
 mod text;
+mod video;
 mod viewport;
 
 use std::collections::BTreeMap;
@@ -21,6 +22,7 @@ pub use error::Error;
 pub use image::Image;
 pub use rectangle::Rectangle;
 pub use scale::Scale;
+pub use video::Video;
 pub use viewport::Viewport;
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -154,7 +156,7 @@ Arguments:
 
 Options:
   --scale <s>       The run's scale (default 1)
-  --output <path>   The output's path (default <script>.png)
+  --output <path>   The still's path; the video is the same path as .mp4 (default <script>.png)
   --help            Print this help",
     );
 
