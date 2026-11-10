@@ -139,14 +139,12 @@ fn help(engine: Option<&Engine>) -> String {
         "pikke — a compositing engine for Lua design scripts
 
 Usage:
-  pikke <script> --width <px> --height <px> [--scale <s>] [options]
+  pikke <script> [--scale <s>] [options]
 
 Arguments:
   <script>          Path to a design script (.lua)
 
 Options:
-  --width <px>      The viewport width in logical px (required)
-  --height <px>     The viewport height in logical px (required)
   --scale <s>       The run's scale (default 1)
   --help            Print this help",
     );

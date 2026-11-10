@@ -53,9 +53,9 @@ executes it against the op table, and encodes the yielded frames
 
 - `size = "auto"` (dropped from the API; sizing is a Lua-side
   computation);
-- producer retry (a failed `spawn` is an error; a transient failure
+- producer retry (a failed `stream` is an error; a transient failure
   is re-run by hand);
-- run presets — the run is a `--scale` against the logical canvas;
+- run presets — the run is a `--scale` against the script's dims;
 - batch-driven runs — v1 is invoked per render from the command
   line; a driver is v2.
 
@@ -67,21 +67,21 @@ From the design review (2026-11-08):
 - **Scope: stills only** for v1. The example design yields one frame
   (`time` given), so v1's real outputs are PNGs; the MP4 path exists
   and is verified with a synthetic producer.
-- **Units: the script is in logical px** — the run's canvas scale,
-  what `width()`/`height()` report. The engine receives the run's
-  scale and performs the logical → physical transform internally; the
-  script never scales.
-  `physical_width()`/`physical_height()` are the only physical-px
-  interface: a frame producer renders in physical px and takes them
-  as its viewport.
-- **`spawn` protocol:** the script passes the producer's protocol
+- **Units: the script is in logical px** — at the run's scale. The
+  engine holds no canvas: the script decides its dims, and the run's
+  `--scale` is the caller's only knob. The engine performs the
+  logical → physical transform internally; the script never scales.
+  An image's `physical_width`/`physical_height` fields are the only
+  physical-px interface: a frame producer renders in physical px and
+  takes them as its viewport.
+- **`stream` protocol:** the script passes the producer's protocol
   flag (`--stdout`); frames are raw RGBA8 on the producer's stdout,
-  canvas-sized. No retry.
+  at the producer's viewport. No retry.
 - **Internal buffer: premultiplied** RGBA, f32 linear (0–1) — the op
   boundary stays straight RGBA8 sRGB (§3b). The linear composite is
   `layer + base·(1 − layer.a)`: no division, and a 0 or 1 alpha on
   either side exact. Premultiplication discards a fully transparent
-  pixel's color — the stored-channel ops (`luma_at`, the autocontrast
+  pixel's color — the stored-channel ops (`luma_in`, the autocontrast
   histogram) read it as colorless — exact while the region is opaque,
   a representation limit otherwise.
 - **`text` anchor:** the tight ink box's top-left lands at `(x, y)`.
@@ -101,7 +101,7 @@ From the design review (2026-11-08):
 
 **(a) Folded into DESIGN.md.** The op-level decisions the script's
 evolution settled: `resize` (the target semantics), `blend`'s `at`,
-the physical canvas queries, the logical/physical units model (the
+the physical-dim fields, the logical/physical units model (the
 engine takes the run's scale and transforms internally; the script is
 logical px throughout), `fill`'s automatic space, and the `auto`-size
 removal.
@@ -111,23 +111,25 @@ down). The spec is expected to evolve as the engine is implemented —
 **deviations from these are allowed**: they are noted in the phase
 record where they occur and folded back into DESIGN.md later:
 
-- **`spawn`'s protocol:** args are strings/numbers (numbers rendered
-  in decimal; a `nil` arg is an engine error). Frames: raw RGBA8, the
-  canvas's physical dims, straight alpha, sRGB; the iterator yields
+- **`stream`'s protocol:** args are strings/numbers (numbers rendered
+  in decimal; a `nil` arg is an engine error). Frames: raw RGBA8 at
+  the producer's viewport, straight alpha, sRGB; the iterator yields
   one frame per step; a truncated stream (a partial frame) or a
   non-zero exit is an error carrying the producer's drained stderr
   tail. The producer's own protocol flag is the script's business.
+  The frame-size channel is open: the engine holds no canvas, so the
+  protocol must carry the frame's dims.
 - **`text`'s anchor and value:** the tight ink box's top-left is at
   `(x, y)` (the engine measures the rasterized ink's offsets and
   compensates). A `Text` value carries its ink-cropped pixels plus
   the laid-out ink position; `bounds()` is that ink box as a
   `Rectangle`. `weight` sets the variable font's `wght` axis; a
   static font ignores it.
-- **`luma_at`:** the mean over the region (clipped to the canvas) of
+- **`luma_in`:** the mean over the region (clipped to the receiver) of
   the Rec. 709 luma of the region's **stored (linear,
   premultiplied)** RGB channels (alpha ignored — a transparent
   pixel is colorless), × 255 (the linear scale — the same scale as
-  the autocontrast histogram's luma); a region with no canvas
+  the autocontrast histogram's luma); a region with no receiver
   overlap — or a negative size — reads 0 (colorless).
 - **`fill`'s paint and span:** the color is a `#RRGGBB` hex (exactly
   six digits after `#`), decoded sRGB → linear at full opacity. The
@@ -139,30 +141,33 @@ record where they occur and folded back into DESIGN.md later:
   geometry-rounding clause does not apply to it. A `Text` region is
   painted by `fill` (the skrifa outlines → the vello raster, §7)
   with its ink's top-left pinned exactly to `(x, y)`. A
-  non-finite or non-positive span paints nothing. `--width`/`--height`
-  are capped at 65535 (the rasterizer's surface bound).
+  non-finite or non-positive span paints nothing. Image dims are
+  capped at 65535 physical px (the rasterizer's surface bound).
 - **Geometry rounding:** positions, sizes and resize targets are real
   px; every geometric result — and the logical → physical transform
   itself — rounds to integer px, ties away from zero (Rust's
   `round` — the first implementation's native rounding).
-- **`yield`'s invariant:** a frame is canvas-sized — every op
-  preserves the receiver's dims (`resize` is the only dim-changing
-  op), so the engine asserts canvas dims on `yield` and on `blend`'s
-  receiver.
+- **`yield`:** the engine holds no canvas — the frame is what the
+  script built. Every op preserves the receiver's dims (`resize` is
+  the only dim-changing op), so a frame's dims are the script's
+  own; `yield` asserts that every frame of a run shares the first
+  frame's dims (a differing dim is an error; lands in Phase 8).
 - **Buffer representation:** at the op boundary a buffer is
   straight-alpha RGBA8 sRGB; internally the buffer is f32 linear
   (0–1), premultiplied (§2), and the sRGB ↔ linear transfer is
   evaluated directly at the boundaries (load, yield) and in the small
-  sRGB-composite and `luma_at` regions — no LUTs. Rounding happens
+  sRGB-composite and `luma_in` regions — no LUTs. Rounding happens
   exactly once, at the linear → 8-bit encode (nearest 1/255 step,
   ties away from zero — Rust's `round`; out-of-range linear values
   clamp).
 - **Parameters and entry:** the script's globals expose the op table
-  and an `arguments` table declaring the entry's parameters (in CLI
-  order) — a table read, so the engine needs no `debug` library. The
-  engine loads the script (paths — `image`/`font`/`require` —
-  resolve against the script's directory), creates a `--<name>` CLI
-  flag for each declared parameter (the CLI, §5), and calls
+  and, when the entry takes parameters, an `arguments` table
+  declaring them (in CLI order; absent — no parameters) — a table
+  read, so the engine needs no `debug` library. The engine loads the
+  script (paths — `image`/`font`/`require` — resolve against the
+  script's directory) with the op table installed before the chunk
+  runs (the script's top level may call ops), creates a `--<name>`
+  CLI flag for each declared parameter (the CLI, §5), and calls
   `render(args)` with a single table of the bound values. v1: a
   flag's value is a string; an omitted or empty flag binds `nil`
   (optionality is the script's — it guards the optional ones); the
@@ -170,16 +175,16 @@ record where they occur and folded back into DESIGN.md later:
 
 ## 4. The script's state
 
-- **Fixed this round:** the spawn args' `[...]` → `{...}` (Lua arrays
+- **Fixed this round:** the stream args' `[...]` → `{...}` (Lua arrays
   are brace-delimited); the `resize` calls' `.` → `:` (the spec's
   method call syntax); the optional `--animation`/`--time` args are
   appended only when the parameter is present — `nil`, bound from the
   omitted or empty flag of that name ("the run names no value") — so
-  an absent term omits the flag; a `nil` that ever reaches `spawn` is
+  an absent term omits the flag; a `nil` that ever reaches `stream` is
   the backstop error (§3b).
 - **Fixed by the script's evolution:** `height = height()` in the
-  resize; the producer's viewport via `physical_width()`/
-  `physical_height()`.
+  resize; the producer's viewport via the image's `physical_width`/
+  `physical_height` fields.
 - **Subsumed, no change needed:** the logos' `resize({width=200})` —
   200 is now a logical constant, correct at every scale; the text's
   `fill` — sRGB by the region's kind.
@@ -187,30 +192,29 @@ record where they occur and folded back into DESIGN.md later:
 ## 5. The v1 harness
 
 - **CLI:**
-  `pikke <script> --width <W> --height <H> [--scale <s>]
-  [--<param> <value>]...` — the script is the first argument (its
-  parameter flags only exist once it is loaded); one named flag per
-  entry-function parameter, created on the fly from the introspected
-  names (§3b; for the example design: `--id --title --subtitle
-  --animation --time`).
-  `--width`/`--height` are the **logical** canvas (the run's canvas
-  dims) — required: the engine is generic and holds no content
-  defaults (not even a default canvas); `--scale` the run's scale,
-  defaulting to 1 (the default run is the canvas at native scale).
-  The physical canvas is `W×s`/`H×s`, each dim rounded (Rust's
-  `round`); the MP4 path needs even physical dims (the caller's
-  choice; 1640×2048 at 0.5/1.0/2.0 are all even). A flag's value is a
-  string; an omitted or empty flag binds `nil`. Errors go to stderr
-  with a non-zero exit.
+  `pikke <script> [--scale <s>] [--<param> <value>]...` — the
+  script is the first argument (its parameter flags only exist once
+  it is loaded); one named flag per entry-function parameter,
+  created on the fly from the introspected names (§3b; for the
+  example design: `--id --title --subtitle --animation --time`).
+  The engine holds no canvas — the script decides its dims — so
+  `--scale` (the run's scale, defaulting to 1) is the caller's only
+  knob; each logical dim × the scale, rounded (Rust's `round`), is
+  the physical dim. The MP4 path needs even physical dims (the
+  script's choice; 1640×2048 at 0.5/1.0/2.0 are all even). A flag's
+  value is a string; an omitted or empty flag binds `nil`. Errors go
+  to stderr with a non-zero exit.
 - **Run size:** the default run is without `--scale` (i.e. 1); a
-  scaled run (Phase 10) runs `--width 1640 --height 2048 --scale 0.5`
-  (physical 820×1024). The engine supplies `width()`/`height()` = the
-  logical canvas and `physical_width()`/`physical_height()` = the
+  scaled run (Phase 10) runs `--scale 0.5` against the example
+  design's own 1640×2048 (physical 820×1024). The script's dims are
+  its own; an image's `physical_width`/`physical_height` report the
   derived physical.
 - **Outputs:** `output.png` / `output.mp4` in the working directory.
   The engine does not know the kind in advance: frame 1 is held, and
   frame 2's arrival starts the MP4 path (flushing frame 1 into the
-  encoder). One yielded frame → the PNG.
+  encoder). One yielded frame → the PNG. All frames share frame 1's
+  dims (`yield`'s invariant, §3b), so the encoder's size is fixed at
+  frame 1.
 - **PNG:** RGBA — the buffer's alpha as-is, no need to drop it (the
   base is opaque, so 255 throughout). Written atomically.
 - **MP4:** the frame stream piped to ffmpeg, hardcoded (the default
@@ -236,18 +240,18 @@ pikke/
     engine.rs    the `Engine`: the Lua VM (mlua) and the script's
                  environment — the op table (each global bound to its
                  type's userdata methods; the binding lives with the
-                 type), the canvas queries (`width`/`height` logical,
-                 `physical_width`/`physical_height` the derived
-                 physical) —, the entry's parameter introspection
-                 (§3b), the execution, and the logical → physical
-                 transform at the op boundary (× the scale, Rust's
-                 `round`)
+                 type), installed before the chunk runs so the
+                 script's top level may call ops —, the entry's
+                 parameter introspection (§3b), the execution, and
+                 the logical → physical transform at the op boundary
+                 (× the scale, Rust's `round`)
     image.rs     the `Image`: the RGBA buffer — buffers are at their
                  own scale (the file's at load, the run's after a
                  resample; §2's form); the API reports logical. Its
-                 ops: load (PNG, the straight RGBA8 sRGB boundary,
-                 §3b), resize / autocontrast / blend / fill / luma_at /
-                 width / height / size.
+                 ops: blank (solid or transparent) / load (PNG, the
+                 straight RGBA8 sRGB boundary, §3b) / resize /
+                 autocontrast / blend / fill / luma_in / width /
+                 height / size / physical_width / physical_height.
     color.rs     the `Color` and the pinned transfer math: the IEC
                  61966-2-1 sRGB ↔ linear conversion (evaluated
                  directly — no LUTs), the single encode rounding
@@ -265,7 +269,7 @@ pikke/
                  run scale) — `fill` does the skrifa outlines →
                  vello rasterization
     rectangle.rs the `Rectangle` and `padded`
-    stream.rs    the `Stream`: the `spawn`'d producer protocol — the
+    stream.rs    the `Stream`: the producer protocol — the
                  stdout frame reader, the stderr drain thread (bounded
                  tail, 1 MiB, for error reports), the lazy iterator,
                  the failure semantics
@@ -298,7 +302,7 @@ Each phase is a small, self-contained step with its gate — the
 verification that closes it.
 
 **Phase 0 — the open spec deltas.** The script is fixed (§4);
-DESIGN.md carries the settled op semantics (§3a). §3b (the spawn
+DESIGN.md carries the settled op semantics (§3a). §3b (the stream
 protocol, the text anchor and value, the luma note, the rounding, the
 yield invariant, the buffer boundary, the parameters and entry) stays
 open for now: the spec evolves with the implementation, and
@@ -316,20 +320,18 @@ flags exist before the pass (and the help text) happens; flag values
 bind to the parameters as strings (an omitted or empty flag binds
 `nil`).
 *Gate:* `pikke <script> --help` prints the `--id --title --subtitle
---animation --time` flags alongside `--width`/`--height`/`--scale`;
-with a bound `--id`, `pikke <script> --width 1640 --height 2048`
-binds the values and fails cleanly at the entry's first op (the op
-table does not exist yet — expected here).
+--animation --time` flags alongside `--scale`; with a bound `--id`,
+`pikke <script>` binds the values and fails cleanly at the entry's
+first op (the op table does not exist yet — expected here).
 
 **Phase 2 — the API surface, mocked.** Scaffold the crate's final
 structure (§6) and draft the entire Lua API with empty mocks: every
-op returns a placeholder; the mock `spawn` returns a lazy stream that
-yields one canvas-sized frame; `yield` records the frame (asserting
-the canvas dims, §3b) and writes no file, encodes nothing.
-*Gate:* with its parameters bound, `pikke <script> --width 1640
---height 2048` invokes the script end to end — every op is called,
-and `yield` was called with the right output (the mock's one
-canvas-sized frame) — producing no image.
+op returns a placeholder; the mock `stream` returns a lazy stream that
+yields one frame; `yield` records the frame and writes no file,
+encodes nothing.
+*Gate:* with its parameters bound, `pikke <script>` invokes the
+script end to end — every op is called, and `yield` was called with
+the right output (the mock's one frame) — producing no image.
 
 **Phase 3 — the pinned color math.** `color.rs`: the IEC 61966-2-1
 sRGB ↔ linear conversion (evaluated directly, 0–1 — no LUTs),
@@ -350,8 +352,8 @@ decode, the straight RGBA8 sRGB boundary in, §3b), `width`/
 `height`/`size`, and the logical → physical transform at the op
 boundary (× the scale, Rust's `round`).
 *Gate:* a real asset loads at its file dims; at `--scale 0.5` the
-canvas is 820×1024 and the op-boundary transform is exact (the 200
-px target → 100, 20 → 10, 150 → 75).
+op-boundary transform is exact (the 200 px target → 100, 20 → 10,
+150 → 75).
 
 **Phase 5a — `resize`.** The real resize (the three target
 semantics; the default cubic and a lanczos — free ops), run in
@@ -382,20 +384,20 @@ preserved, `padded` growing all sides by `n`.
 (pinned; linear on the buffer, or sRGB by decoding both sides,
 `over`'ing, and re-encoding), `other`'s top-left at `at` (a
 `Rectangle`, default `(0, 0)`, the signed physical transform for the
-off-canvas halves), clipped to the canvas; a layer still at its file
-scale resamples to the run scale here, to its logical dims (the
+off-receiver halves), clipped to the receiver; a layer still at its
+file scale resamples to the run scale here, to its logical dims (the
 composite the one-resample's second trigger, §8).
 *Gate:* headless, on real pairs: the `over` exact at 8-bit (the
 pinned math — byte-identical where an alpha is 0 or 255), the `at`
-offset and the canvas clip exact.
+offset and the receiver clip exact.
 
-**Phase 6c — `luma_at`.** The real `luma_at`: the mean, over the
-region (clipped to the canvas), of the Rec. 709 luma of the region's
-stored (linear, premultiplied) RGB channels (alpha ignored — a
-transparent pixel is colorless), × 255 (the linear scale, §3b — no
+**Phase 6c — `luma_in`.** The real `luma_in`: the mean, over the
+region (clipped to the receiver), of the Rec. 709 luma of the
+region's stored (linear, premultiplied) RGB channels (alpha ignored —
+a transparent pixel is colorless), × 255 (the linear scale, §3b — no
 sRGB round-trip; the thresholds run on the same scale as the
 autocontrast histogram).
-*Gate:* on the sample backgrounds, headless: the `luma_at` matching
+*Gate:* on the sample backgrounds, headless: the `luma_in` matching
 the 709 mean.
 
 **Phase 6d — `fill` (done).** The real `fill` on `vello_cpu` 0.3
@@ -409,8 +411,8 @@ linear, full opacity) composited over the buffer with the pinned
 accepted but paints nothing while `text` is mocked (the real sRGB
 ink paint lands in Phase 7); `standard.lua` fills one. `#RRGGBB`
 only (six hex digits after `#`); a non-finite or non-positive span
-paints nothing. The harness caps `--width`/`--height` at 65535
-(vello's surface bound).
+paints nothing. Image dims are capped at 65535 physical px (vello's
+surface bound).
 *Gate (met):* an aligned region paints byte-exactly (the interior
 the hex's own bytes, the outside untouched) — pinning vello's exact
 0/255 aligned coverage; fractional edges match the pinned composite
@@ -434,7 +436,7 @@ bboxes). `Text` stores the ink box, the scale, the ink offset and
 the parley `Layout` — no color, no pixels; an empty string or an
 unknown family is a degenerate (empty-layout) `Text`, and `bounds`
 reports the logical box. The paint lands in `fill`: the per-glyph
-skrifa outlines (y-flipped to canvas space, the variable location
+skrifa outlines (y-flipped to image space, the variable location
 applied) rasterized through `vello` into the ink box plus a 1 px AA
 margin, the ink's top-left pinned exactly to `(x, y)`, composited
 with the pinned sRGB `over`.
@@ -444,19 +446,22 @@ real plate: the ink's top-left exactly `(x, y)` (pinned), the fill
 the hex's own bytes (the fully-covered pixels exact), the plate
 byte-identical outside the ink (PIL).
 
-**Phase 8 — the real Stream.** `spawn`'s producer protocol: the
-stdout frame reader (raw RGBA8, the canvas's physical dims), the
-stderr drain (the bounded 1 MiB tail), the lazy iterator (one frame
-per step), the failure semantics (a truncated stream or a non-zero
-exit → an error carrying the stderr tail).
+**Phase 8 — the real Stream.** `stream`'s producer protocol: the
+stdout frame reader (raw RGBA8 at the producer's viewport — the
+frame-size channel, §3b), the stderr drain (the bounded 1 MiB tail),
+the lazy iterator (one frame per step), the failure semantics (a
+truncated stream or a non-zero exit → an error carrying the stderr
+tail), and the `yield` frame-size invariant (every frame shares the
+first frame's dims, §3b).
 *Gate (no GPU):* a synthetic producer (a small script writing N raw
 RGBA8 frames to stdout) — N frames yielded byte-for-byte; a
 truncated stream and a non-zero exit each surface as an error
-carrying the stderr tail. With the GPU: one real still (a frame
+carrying the stderr tail; a stream whose frames differ in dims fails
+with the invariant's error. With the GPU: one real still (a frame
 producer through a minimal `background:blend(frame)` script, the
-viewport from `physical_width()`/`physical_height()`) — the yielded
-frame equals the raw stream's frame byte-for-byte (no free op
-between them).
+viewport from the image's `physical_width`/`physical_height`
+fields) — the yielded frame equals the raw stream's frame
+byte-for-byte (no free op between them).
 
 **Phase 9 — the encoder.** The PNG writer (RGBA, atomic) and the
 ffmpeg MP4 pipe (the default flags, §5); the PNG/MP4 decision at
@@ -466,8 +471,8 @@ byte-for-byte (lossless); N frames → `output.mp4` with N frames
 (ffprobe).
 
 **Phase 10 — the example design, end to end.** Run the example
-design at a run scale: `pikke <script> --width 1640 --height 2048
---scale 0.5 <params>` (the omitted optional parameters bind `nil`,
+design at a run scale: `pikke <script> --scale 0.5 <params>` (the
+script's own 1640×2048; the omitted optional parameters bind `nil`,
 and the script omits the flags they feed) and inspect `output.png`.
 *Gate:* the composite is correct end to end — the geometry exact
 (the fit, the crop, the placed elements' positions, all logical px
@@ -514,4 +519,4 @@ question for engine outputs.
 ## 9. Next
 
 The phase ladder is settled (§7); the next working step is Phase 8
-(the real `Stream`: the `spawn`'d producer protocol).
+(the real `Stream`: the producer protocol).

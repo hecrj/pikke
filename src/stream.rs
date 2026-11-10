@@ -34,7 +34,7 @@ impl UserData for Stream {
 
 pub fn install(lua: &Lua, env: &Table, scale: Scale) -> anywho::Result<()> {
     env.set(
-        "spawn",
+        "stream",
         lua.create_function(
             move |_lua, (_program, _args): (String, Table)| -> Result<Stream> {
                 Ok(Stream {
