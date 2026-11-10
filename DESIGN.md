@@ -108,7 +108,7 @@ change is a script edit; an op-behavior change is an engine edit.
 | `height` | `text.height → number` | The ink box's height in logical px. |
 | `bounds` | `text.bounds → Rectangle` | The tight ink box at the laid-out position. |
 | `translate` | `text:translate({x, y})` | Move the ink box by a logical offset. In place. |
-| `padded` | `rectangle:padded(n) → Rectangle` | The rect grown by `n` px on all sides. |
+| `padded` | `rectangle:padded(n) → Rectangle` | The rect grown by `n` px on all sides; `padded({vertical, horizontal})` grows top/bottom and left/right; `padded({left, top, right, bottom})` grows each side (a missing side is 0). |
 
 ### Output
 
