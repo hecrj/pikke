@@ -133,12 +133,12 @@ record where they occur and folded back into DESIGN.md later:
   overlap — or a negative size — reads 0 (colorless).
 - **`fill`'s paint and span:** the color is a `#RRGGBB` hex (exactly
   six digits after `#`), decoded sRGB → linear at full opacity. The
-  region's span — each edge × the run scale — is painted **unrounded**
-  through `vello_cpu`'s coverage rasterizer (the region in logical
-  real px under the run-scale transform; its alpha mask is the
-  sub-pixel coverage) and the pinned paint composited over the buffer
-  with the pinned `over` — a paint span is sub-pixel geometry, so the
-  geometry-rounding clause does not apply to it. A `Text` region is
+  region's span — each edge × the run scale, **rounded to the pixel
+  grid** (Rust's `round` — the geometry-rounding clause applies to
+  the paint span: the axis-aligned edges land on the boundary, the
+  diagonal ones keep their sub-pixel coverage) — is painted through
+  `vello_cpu`'s coverage rasterizer and the pinned paint composited
+  over the buffer with the pinned `over`. A `Text` region is
   painted by `fill` (the skrifa outlines → the vello raster, §7)
   with its ink's top-left pinned exactly to `(x, y)`. A `Path`
   region — the `path` op's recorded subpaths — is painted by the
@@ -280,6 +280,11 @@ pikke/
                  run scale) — `fill` does the skrifa outlines →
                  vello rasterization
     rectangle.rs the `Rectangle` and `padded`
+    path.rs      the `Path`: the recorded subpaths (`move_to` /
+                 `line_to` / `close`, local logical px),
+                 `translate` (the logical offset) — `fill` snaps
+                 them (× the scale, each point rounded to the px)
+                 through the vello raster
     stream.rs    the `Stream`: the producer protocol — the
                  stdout frame reader, the stderr drain thread (bounded
                  tail, 1 MiB, for error reports), the lazy iterator,

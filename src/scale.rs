@@ -1,6 +1,8 @@
-use crate::Result;
-
 use std::ops;
+
+use vello_cpu::kurbo::Point;
+
+use crate::Result;
 
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub struct Scale(f32);
@@ -40,6 +42,22 @@ impl From<Scale> for f32 {
 impl From<Scale> for f64 {
     fn from(scale: Scale) -> Self {
         f64::from(scale.0)
+    }
+}
+
+impl ops::Mul<Scale> for f32 {
+    type Output = f32;
+
+    fn mul(self, rhs: Scale) -> Self::Output {
+        self * rhs.0
+    }
+}
+
+impl ops::Mul<Scale> for Point {
+    type Output = Point;
+
+    fn mul(self, rhs: Scale) -> Self::Output {
+        Point::new(self.x * rhs.0 as f64, self.y * rhs.0 as f64)
     }
 }
 

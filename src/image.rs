@@ -288,15 +288,15 @@ impl Image {
     pub fn fill<'a>(&mut self, fill: impl Into<Geometry<'a>>, paint: Color) {
         let mut resources = Resources::new();
         let mut context = RenderContext::new(self.width(), self.height());
-        context.set_transform(Affine::scale(self.viewport.scale().into()));
         context.set_paint(AlphaColor::<Srgb>::BLACK);
 
         match fill.into() {
             Geometry::Rectangle(region) => {
-                let left = region.x;
-                let top = region.y;
-                let right = region.x + region.width;
-                let bottom = region.y + region.height;
+                let scale = self.viewport.scale();
+                let left = region.x * scale;
+                let top = region.y * scale;
+                let right = (region.x + region.width) * scale;
+                let bottom = (region.y + region.height) * scale;
 
                 if region.width <= 0.0 || region.height <= 0.0 {
                     return;
@@ -310,14 +310,13 @@ impl Image {
                     return;
                 }
 
-                context.fill_rect(&Rect::new(
-                    left.into(),
-                    top.into(),
-                    right.into(),
-                    bottom.into(),
-                ));
+                context.fill_rect(
+                    &Rect::new(left.into(), top.into(), right.into(), bottom.into()).round(),
+                );
             }
             Geometry::Path(path) => {
+                let path = path.snap(self.viewport.scale());
+
                 context.fill_path(path.as_ref());
             }
         }
@@ -1454,14 +1453,14 @@ mod tests {
     }
 
     #[test]
-    fn the_fill_antialiases_fractional_edges() -> Result<()> {
+    fn the_fill_snaps_fractional_edges_to_the_pixel_grid() -> Result<()> {
         let mut image = Image::new(Scale::default(), 4.0, 4.0, Color::TRANSPARENT)?;
         let paint = Color::from_rgba_u8([255, 0, 0, 255]).srgb_to_linear();
 
         image.fill(Rectangle::new(0.5, 0.5, 3.0, 3.0), paint);
 
         let coverages = [
-            64, 128, 128, 64, 128, 255, 255, 128, 128, 255, 255, 128, 64, 128, 128, 64,
+            0, 0, 0, 0, 0, 255, 255, 255, 0, 255, 255, 255, 0, 255, 255, 255,
         ];
         let painted = image.to_rgba8();
         for (i, coverage) in coverages.iter().enumerate() {
@@ -1482,14 +1481,14 @@ mod tests {
     }
 
     #[test]
-    fn the_fill_antialiases_at_the_run_scale() -> Result<()> {
+    fn the_fill_snaps_at_the_run_scale() -> Result<()> {
         let mut image = Image::new(Scale::new(0.5), 16.0, 16.0, Color::TRANSPARENT)?;
         let paint = Color::from_rgba_u8([0, 255, 255, 255]).srgb_to_linear();
 
         image.fill(Rectangle::new(0.5, 0.5, 3.0, 3.0), paint);
 
         let coverages = [
-            143, 143, 0, 0, 0, 0, 0, 0, 143, 143, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            255, 255, 0, 0, 0, 0, 0, 0, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             0, 0, 0, 0, 0, 0, 0, 0, 0,
         ];

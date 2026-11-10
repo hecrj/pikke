@@ -1,34 +1,65 @@
-use mlua::{Lua, Result, Table, UserData, UserDataFields, UserDataMethods};
-use vello_cpu::kurbo::BezPath;
+use mlua::{Lua, Result, Table, UserData, UserDataFields, UserDataMethods, Value};
+use vello_cpu::kurbo::{Affine, BezPath, PathEl};
+
+use crate::Scale;
 
 #[derive(Clone, Debug, Default)]
 pub struct Path {
-    path: BezPath,
+    raw: BezPath,
 }
 
 impl Path {
     pub fn new() -> Path {
         Path {
-            path: BezPath::new(),
+            raw: BezPath::new(),
         }
     }
 
     pub fn move_to(&mut self, x: f32, y: f32) {
-        self.path.move_to((x as f64, y as f64));
+        self.raw.move_to((x as f64, y as f64));
     }
 
     pub fn line_to(&mut self, x: f32, y: f32) {
-        self.path.line_to((x as f64, y as f64));
+        self.raw.line_to((x as f64, y as f64));
     }
 
     pub fn close(&mut self) {
-        self.path.close_path();
+        self.raw.close_path();
+    }
+
+    pub fn translate(&mut self, x: f32, y: f32) {
+        self.raw
+            .apply_affine(Affine::translate((x as f64, y as f64)));
+    }
+
+    pub fn snap(&self, scale: Scale) -> Self {
+        let mut path = self.clone();
+
+        for element in path.raw.elements_mut() {
+            match element {
+                PathEl::MoveTo(point) | PathEl::LineTo(point) => {
+                    *point = (*point * scale).round();
+                }
+                PathEl::QuadTo(a, b) => {
+                    *a = (*a * scale).round();
+                    *b = (*b * scale).round();
+                }
+                PathEl::CurveTo(a, b, c) => {
+                    *a = (*a * scale).round();
+                    *b = (*b * scale).round();
+                    *c = (*c * scale).round();
+                }
+                PathEl::ClosePath => {}
+            }
+        }
+
+        path
     }
 }
 
 impl AsRef<BezPath> for Path {
     fn as_ref(&self) -> &BezPath {
-        &self.path
+        &self.raw
     }
 }
 
@@ -61,6 +92,41 @@ impl UserData for Path {
 
             Ok(())
         });
+
+        methods.add_method_mut(
+            "translate",
+            |_lua, this, offset: Table| -> mlua::Result<()> {
+                let number = |name: &str, value: Option<Value>| -> mlua::Result<f32> {
+                    match value {
+                        None => Ok(0.0),
+                        Some(Value::Number(value)) => Ok(value as f32),
+                        Some(Value::Integer(value)) => Ok(value as f32),
+                        Some(_) => Err(mlua::Error::RuntimeError(format!(
+                            "translate: '{name}' is not a number"
+                        ))),
+                    }
+                };
+
+                let dx = number("x", offset.get("x")?)?;
+                let dy = number("y", offset.get("y")?)?;
+
+                if !dx.is_finite() {
+                    return Err(mlua::Error::RuntimeError(
+                        "translate: 'x' must be finite".to_owned(),
+                    ));
+                }
+
+                if !dy.is_finite() {
+                    return Err(mlua::Error::RuntimeError(
+                        "translate: 'y' must be finite".to_owned(),
+                    ));
+                }
+
+                this.translate(dx, dy);
+
+                Ok(())
+            },
+        );
     }
 }
 
@@ -96,7 +162,7 @@ mod tests {
         path.close();
 
         assert_eq!(
-            path.path.elements(),
+            path.raw.elements(),
             &[
                 PathEl::MoveTo(Point::new(1.0, 2.0)),
                 PathEl::LineTo(Point::new(3.0, 4.0)),
@@ -123,7 +189,7 @@ mod tests {
 
         let path = path.borrow::<Path>().unwrap();
         assert_eq!(
-            path.path.elements(),
+            path.raw.elements(),
             &[
                 PathEl::MoveTo(Point::new(1.0, 2.0)),
                 PathEl::LineTo(Point::new(3.0, 0.0)),
