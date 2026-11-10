@@ -172,7 +172,7 @@ fn drain_stderr(mut stderr: ChildStderr) -> (mpsc::Receiver<Vec<u8>>, JoinHandle
     (rx, drain)
 }
 
-pub fn install(lua: &Lua, env: &Table, scale: Scale) -> anywho::Result<()> {
+pub fn install(lua: &Lua, env: &Table, scale: Scale) -> Result<()> {
     env.set(
         "stream",
         lua.create_function(

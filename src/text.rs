@@ -278,7 +278,7 @@ impl UserData for Text {
     }
 }
 
-pub fn install(lua: &Lua, env: &Table, scale: Scale) -> anywho::Result<()> {
+pub fn install(lua: &Lua, env: &Table, scale: Scale) -> Result<()> {
     env.set(
         "text",
         lua.create_function(

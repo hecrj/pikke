@@ -13,8 +13,7 @@ mod viewport;
 
 use std::collections::BTreeMap;
 use std::path::Path;
-
-use anywho::anywho;
+use std::process::ExitCode;
 
 pub use color::Color;
 pub use engine::Engine;
@@ -27,7 +26,17 @@ pub use viewport::Viewport;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-fn main() -> anywho::Result<()> {
+fn main() -> ExitCode {
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> Result<()> {
     let mut args = std::env::args();
     let _process = args.next();
 
@@ -50,18 +59,22 @@ fn main() -> anywho::Result<()> {
             };
 
             if arg == "--scale" {
-                let value = args
-                    .next()
-                    .ok_or_else(|| anywho!("--scale requires a value"))?;
+                let value = args.next().ok_or_else(|| Error::OptionMissingValue {
+                    option: "--scale".to_owned(),
+                })?;
 
-                let value: f32 = value
-                    .parse()
-                    .map_err(|_| anywho!("invalid --scale value: {value}"))?;
+                let value: f32 = value.parse().map_err(|_| Error::OptionInvalidValue {
+                    option: "--scale".to_owned(),
+                    value: value.clone(),
+                    note: "not a number".to_owned(),
+                })?;
 
                 if value <= 0.0 || !value.is_finite() {
-                    return Err(anywho!(
-                        "invalid --scale value: {value} (must be a positive number)"
-                    ));
+                    return Err(Error::OptionInvalidValue {
+                        option: "--scale".to_owned(),
+                        value: value.to_string(),
+                        note: "must be a positive number".to_owned(),
+                    });
                 }
 
                 break value;
@@ -85,26 +98,29 @@ fn main() -> anywho::Result<()> {
                 let _ = args.next();
             }
             "--output" => {
-                output = Some(
-                    args.next()
-                        .ok_or_else(|| anywho!("--output requires a value"))?,
-                );
+                output = Some(args.next().ok_or_else(|| Error::OptionMissingValue {
+                    option: "--output".to_owned(),
+                })?);
             }
             argument if argument.starts_with('-') => {
                 let option = argument.trim_start_matches('-').to_owned();
 
                 if !argument.starts_with("--") || !engine.arguments().contains(&option) {
-                    return Err(anywho!("invalid option: {argument}"));
+                    return Err(Error::OptionUnknown {
+                        option: argument.to_owned(),
+                    });
                 }
 
-                let value = args
-                    .next()
-                    .ok_or_else(|| anywho!("{argument} requires a value"))?;
+                let value = args.next().ok_or_else(|| Error::OptionMissingValue {
+                    option: argument.to_owned(),
+                })?;
 
                 values.insert(option, value);
             }
             _ => {
-                return Err(anywho!("invalid argument: {arg}"));
+                return Err(Error::ArgumentUnknown {
+                    argument: arg.clone(),
+                });
             }
         }
     }

@@ -1,5 +1,6 @@
 use std::io;
 use std::num;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -21,6 +22,40 @@ pub enum Error {
     ImageOperationFailed(Arc<image::ImageError>),
     #[error("IO operation failed: {0}")]
     IoFailed(Arc<io::Error>),
+    #[error("{0}")]
+    Lua(Arc<mlua::Error>),
+    #[error("{option} requires a value")]
+    OptionMissingValue { option: String },
+    #[error("invalid {option} value: {value} ({note})")]
+    OptionInvalidValue {
+        option: String,
+        value: String,
+        note: String,
+    },
+    #[error("invalid option: {option}")]
+    OptionUnknown { option: String },
+    #[error("invalid argument: {argument}")]
+    ArgumentUnknown { argument: String },
+    #[error("failed to read {script}: {error}")]
+    ReadFailed {
+        script: PathBuf,
+        error: Arc<io::Error>,
+    },
+    #[error("script {script}: 'render' is missing or not a function")]
+    RenderMissing { script: PathBuf },
+    #[error("script {script}: 'ARGUMENTS' must be a table ({error})")]
+    ArgumentsNotTable {
+        script: PathBuf,
+        error: Arc<mlua::Error>,
+    },
+    #[error("script {script}: '{name}' is a reserved argument name")]
+    ArgumentReserved { script: PathBuf, name: String },
+    #[error("script {script}: 'ARGUMENTS' entry {index} must be a string ({error})")]
+    ArgumentNotString {
+        script: PathBuf,
+        index: usize,
+        error: Arc<mlua::Error>,
+    },
 }
 
 impl From<image::ImageError> for Error {
@@ -32,6 +67,12 @@ impl From<image::ImageError> for Error {
 impl From<io::Error> for Error {
     fn from(error: io::Error) -> Self {
         Self::IoFailed(Arc::new(error))
+    }
+}
+
+impl From<mlua::Error> for Error {
+    fn from(error: mlua::Error) -> Self {
+        Self::Lua(Arc::new(error))
     }
 }
 

@@ -9,12 +9,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
-name = "anywho"
-version = "0.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9184cf631093d05783ad73508072fb8dbb0de0c0c149b7180ff78481fb9da8be"
-
-[[package]]
 name = "arrayvec"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -626,7 +620,6 @@ dependencies = [
 name = "pikke"
 version = "0.1.0"
 dependencies = [
- "anywho",
  "fontique",
  "image",
  "mlua",

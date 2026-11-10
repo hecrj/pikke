@@ -758,7 +758,7 @@ impl UserData for Image {
     }
 }
 
-pub fn install(lua: &Lua, env: &Table, script_dir: &Path, scale: Scale) -> anywho::Result<()> {
+pub fn install(lua: &Lua, env: &Table, script_dir: &Path, scale: Scale) -> Result<()> {
     let script_dir = script_dir.to_path_buf();
     env.set(
         "image",

@@ -19,7 +19,7 @@ impl UserData for Font {
     }
 }
 
-pub fn install(lua: &Lua, env: &Table, script_dir: &Path) -> anywho::Result<()> {
+pub fn install(lua: &Lua, env: &Table, script_dir: &Path) -> crate::Result<()> {
     let script_dir = script_dir.to_path_buf();
     env.set(
         "font",

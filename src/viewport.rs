@@ -86,7 +86,7 @@ mod tests {
     use super::{Scale, Viewport};
 
     #[test]
-    fn the_transform_is_exact() -> anywho::Result<()> {
+    fn the_transform_is_exact() -> crate::Result<()> {
         let viewport = Viewport::from_physical_u32(512, 512, Scale::new(0.5))?;
 
         assert_eq!(viewport.scale().to_physical(200.0)?, 100);

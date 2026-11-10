@@ -1,9 +1,9 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use anywho::anywho;
 use mlua::{AnyUserData, Function, Lua, Table};
 
-use crate::{Image, Scale, Video, font, image, rectangle, stream, text};
+use crate::{Error, Image, Result, Scale, Video, font, image, rectangle, stream, text};
 
 pub struct Engine {
     script: PathBuf,
@@ -14,12 +14,14 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub fn load(script: impl AsRef<Path>, scale: impl Into<Scale>) -> anywho::Result<Engine> {
+    pub fn load(script: impl AsRef<Path>, scale: impl Into<Scale>) -> Result<Engine> {
         let script = script.as_ref().to_path_buf();
         let scale = scale.into();
 
-        let source = std::fs::read_to_string(&script)
-            .map_err(|error| anywho!("failed to read {}: {error}", script.display()))?;
+        let source = std::fs::read_to_string(&script).map_err(|error| Error::ReadFailed {
+            script: script.clone(),
+            error: Arc::new(error),
+        })?;
 
         let lua = Lua::new();
         let env = lua.globals();
@@ -48,11 +50,8 @@ impl Engine {
         let chunk = lua.load(source).set_name(script.display().to_string());
         chunk.call::<()>(())?;
 
-        let render: Function = env.get("render").map_err(|_| {
-            anywho!(
-                "script {}: 'render' is missing or not a function",
-                script.display()
-            )
+        let render: Function = env.get("render").map_err(|_| Error::RenderMissing {
+            script: script.clone(),
         })?;
 
         let arguments = arguments(&script, &env)?;
@@ -74,11 +73,7 @@ impl Engine {
         &self.arguments
     }
 
-    pub fn run(
-        &self,
-        params: &[(String, Option<String>)],
-        output: Option<&Path>,
-    ) -> anywho::Result<()> {
+    pub fn run(&self, params: &[(String, Option<String>)], output: Option<&Path>) -> Result<()> {
         let script = self.script.clone();
 
         let output = output
@@ -166,13 +161,13 @@ fn default_output(script: &Path) -> PathBuf {
         .unwrap_or(PathBuf::from("output.png"))
 }
 
-fn arguments(script: &Path, env: &Table) -> anywho::Result<Vec<String>> {
-    let arguments: Option<Table> = env.get("ARGUMENTS").map_err(|error| {
-        anywho!(
-            "script {}: 'ARGUMENTS' must be a table ({error})",
-            script.display()
-        )
-    })?;
+fn arguments(script: &Path, env: &Table) -> Result<Vec<String>> {
+    let arguments: Option<Table> =
+        env.get("ARGUMENTS")
+            .map_err(|error| Error::ArgumentsNotTable {
+                script: script.to_path_buf(),
+                error: Arc::new(error),
+            })?;
 
     let Some(arguments) = arguments else {
         return Ok(Vec::new());
@@ -183,18 +178,18 @@ fn arguments(script: &Path, env: &Table) -> anywho::Result<Vec<String>> {
     for (i, argument) in arguments.sequence_values().enumerate() {
         match argument {
             Ok(name) if name == "scale" || name == "output" => {
-                return Err(anywho!(
-                    "script {}: '{name}' is a reserved argument name",
-                    script.display()
-                ));
+                return Err(Error::ArgumentReserved {
+                    script: script.to_path_buf(),
+                    name,
+                });
             }
             Ok(name) => names.push(name),
             Err(error) => {
-                return Err(anywho!(
-                    "script {}: 'ARGUMENTS' entry {} must be a string ({error})",
-                    i + 1,
-                    script.display()
-                ));
+                return Err(Error::ArgumentNotString {
+                    script: script.to_path_buf(),
+                    index: i + 1,
+                    error: Arc::new(error),
+                });
             }
         }
     }

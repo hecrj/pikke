@@ -44,7 +44,7 @@ impl UserData for Rectangle {
     }
 }
 
-pub fn install(lua: &Lua, env: &Table) -> anywho::Result<()> {
+pub fn install(lua: &Lua, env: &Table) -> crate::Result<()> {
     env.set(
         "rectangle",
         lua.create_function(|_lua, opts: Table| -> Result<Rectangle> {
