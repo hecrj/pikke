@@ -39,32 +39,17 @@ pub enum Mode {
 }
 
 impl Image {
-    pub fn transparent(width: f32, height: f32, scale: Scale) -> Result<Self> {
-        let count = (width * height) as usize;
-
-        Ok(Self {
-            buffer: Arc::new(Buffer {
-                r: vec![0.0; count],
-                g: vec![0.0; count],
-                b: vec![0.0; count],
-                a: vec![0.0; count],
-            }),
-            viewport: Viewport::from_logical(width, height, scale)?,
-            target_scale: scale,
-        })
-    }
-
-    pub fn blank(width: f32, height: f32, paint: Color, scale: Scale) -> Result<Self> {
+    pub fn new(scale: Scale, width: f32, height: f32, color: Color) -> Result<Self> {
         let viewport = Viewport::from_logical(width, height, scale)?;
         let count = viewport.total_pixels();
-        let paint = paint.premultiply();
+        let color = color.premultiply();
 
         Ok(Self {
             buffer: Arc::new(Buffer {
-                r: vec![paint.r; count],
-                g: vec![paint.g; count],
-                b: vec![paint.b; count],
-                a: vec![paint.a; count],
+                r: vec![color.r; count],
+                g: vec![color.g; count],
+                b: vec![color.b; count],
+                a: vec![color.a; count],
             }),
             viewport,
             target_scale: scale,
@@ -772,8 +757,6 @@ pub fn install(lua: &Lua, env: &Table, script_dir: &Path, scale: Scale) -> anywh
                 .ok_or_else(|| mlua::Error::RuntimeError("blank: needs 'width'".to_owned()))?;
             let height = height
                 .ok_or_else(|| mlua::Error::RuntimeError("blank: needs 'height'".to_owned()))?;
-            let color = color
-                .ok_or_else(|| mlua::Error::RuntimeError("blank: needs 'color'".to_owned()))?;
 
             if width <= 0.0 || !width.is_finite() {
                 return Err(mlua::Error::RuntimeError(
@@ -787,9 +770,13 @@ pub fn install(lua: &Lua, env: &Table, script_dir: &Path, scale: Scale) -> anywh
                 ));
             }
 
-            let paint = paint_from_hex("blank", &color)?;
+            let paint = if let Some(color) = color {
+                paint_from_hex("blank", &color)?
+            } else {
+                Color::TRANSPARENT
+            };
 
-            Image::blank(width, height, paint, scale)
+            Image::new(scale, width, height, paint)
                 .map_err(|error| mlua::Error::RuntimeError(error.to_string()))
         })?,
     )?;
@@ -837,7 +824,7 @@ mod tests {
     #[test]
     fn the_blank_paints_the_whole_canvas() -> Result<()> {
         let paint = Color::from_rgba_u8([200, 30, 60, 255]).srgb_to_linear();
-        let image = Image::blank(4.0, 2.0, paint, Scale::default())?;
+        let image = Image::new(Scale::default(), 4.0, 2.0, paint)?;
 
         assert_eq!((image.width(), image.height()), (4, 2));
         for pixel in image.to_rgba8().chunks(4) {
@@ -850,7 +837,7 @@ mod tests {
     #[test]
     fn the_blank_sizes_its_buffer_at_the_run_scale() -> Result<()> {
         let paint = Color::from_rgba_u8([255, 255, 255, 255]).srgb_to_linear();
-        let image = Image::blank(300.0, 100.0, paint, Scale::new(0.5))?;
+        let image = Image::new(Scale::new(0.5), 300.0, 100.0, paint)?;
 
         assert_eq!((image.width(), image.height()), (150, 50));
         assert_eq!(image.buffer.r.len(), 150 * 50);
@@ -886,6 +873,14 @@ mod tests {
             assert_eq!(pixel, &[200, 30, 60, 255]);
         }
 
+        let opts = lua.create_table().unwrap();
+        opts.set("width", 4).unwrap();
+        opts.set("height", 2).unwrap();
+        let userdata: AnyUserData = blank.call(opts).unwrap();
+        let image = userdata.borrow::<Image>().unwrap().clone();
+        assert_eq!((image.width(), image.height()), (4, 2));
+        assert!(image.to_rgba8().iter().all(|&byte| byte == 0));
+
         let error = |opts: Table| blank.call::<AnyUserData>(opts).unwrap_err().to_string();
 
         let opts = lua.create_table().unwrap();
@@ -897,11 +892,6 @@ mod tests {
         opts.set("width", 4).unwrap();
         opts.set("color", "#C81E3C").unwrap();
         assert!(error(opts).contains("blank: needs 'height'"));
-
-        let opts = lua.create_table().unwrap();
-        opts.set("width", 4).unwrap();
-        opts.set("height", 2).unwrap();
-        assert!(error(opts).contains("blank: needs 'color'"));
 
         let opts = lua.create_table().unwrap();
         opts.set("width", 0.0).unwrap();
@@ -1366,7 +1356,7 @@ mod tests {
     #[test]
     fn the_blend_resamples_the_file_scale_layer() -> Result<()> {
         let lenna = Path::new(env!("CARGO_MANIFEST_DIR")).join("images/Lenna.png");
-        let mut base = Image::transparent(512.0, 512.0, Scale::new(0.5))?;
+        let mut base = Image::new(Scale::new(0.5), 512.0, 512.0, Color::TRANSPARENT)?;
         let layer = load(&lenna, Scale::new(0.5)).unwrap();
 
         base.blend(&layer, Rectangle::default(), Space::Linear)?;
@@ -1386,7 +1376,7 @@ mod tests {
 
     #[test]
     fn the_fill_paints_an_aligned_region_exactly() -> Result<()> {
-        let mut image = Image::transparent(8.0, 8.0, Scale::default())?;
+        let mut image = Image::new(Scale::default(), 8.0, 8.0, Color::TRANSPARENT)?;
         let paint = Color::from_rgba_u8([128, 160, 192, 255]).srgb_to_linear();
 
         image.fill(Rectangle::new(1.0, 2.0, 4.0, 3.0), paint);
@@ -1410,7 +1400,7 @@ mod tests {
 
     #[test]
     fn the_fill_antialiases_fractional_edges() -> Result<()> {
-        let mut image = Image::transparent(4.0, 4.0, Scale::default())?;
+        let mut image = Image::new(Scale::default(), 4.0, 4.0, Color::TRANSPARENT)?;
         let paint = Color::from_rgba_u8([255, 0, 0, 255]).srgb_to_linear();
 
         image.fill(Rectangle::new(0.5, 0.5, 3.0, 3.0), paint);
@@ -1438,7 +1428,7 @@ mod tests {
 
     #[test]
     fn the_fill_antialiases_at_the_run_scale() -> Result<()> {
-        let mut image = Image::transparent(16.0, 16.0, Scale::new(0.5))?;
+        let mut image = Image::new(Scale::new(0.5), 16.0, 16.0, Color::TRANSPARENT)?;
         let paint = Color::from_rgba_u8([0, 255, 255, 255]).srgb_to_linear();
 
         image.fill(Rectangle::new(0.5, 0.5, 3.0, 3.0), paint);
@@ -1468,7 +1458,7 @@ mod tests {
 
     #[test]
     fn the_fill_is_a_no_op_for_degenerate_regions() -> Result<()> {
-        let mut image = Image::transparent(4.0, 4.0, Scale::default())?;
+        let mut image = Image::new(Scale::default(), 4.0, 4.0, Color::TRANSPARENT)?;
         let paint = Color::from_rgba_u8([255, 255, 255, 255]).srgb_to_linear();
 
         image.fill(Rectangle::new(0.0, 0.0, 0.0, 0.0), paint);
@@ -1484,7 +1474,7 @@ mod tests {
     #[test]
     fn the_fill_binding_validates_its_arguments() -> Result<()> {
         let lua = Lua::new();
-        let image = Image::transparent(4.0, 4.0, Scale::default())?;
+        let image = Image::new(Scale::default(), 4.0, 4.0, Color::TRANSPARENT)?;
         let output = lua.create_userdata(image).unwrap();
         let region = lua
             .create_userdata(Rectangle::new(0.0, 0.0, 2.0, 2.0))
@@ -1558,7 +1548,7 @@ mod tests {
         let text = Text::new(Scale::default(), "Noto Sans", 100.0, 400.0, 10.0, 10.0, "N")?;
         assert!(text.viewport.logical_width() > 0.0 && text.viewport.logical_height() > 0.0);
 
-        let mut image = Image::transparent(200.0, 200.0, Scale::default())?;
+        let mut image = Image::new(Scale::default(), 200.0, 200.0, Color::TRANSPARENT)?;
         let paint = Color::from_rgba_u8([200, 30, 60, 255]).srgb_to_linear();
         image.fill_text(&text, paint)?;
 
@@ -1611,7 +1601,7 @@ mod tests {
 
     #[test]
     fn the_fill_text_is_a_no_op_for_degenerate_text() -> Result<()> {
-        let mut image = Image::transparent(4.0, 4.0, Scale::default())?;
+        let mut image = Image::new(Scale::default(), 4.0, 4.0, Color::TRANSPARENT)?;
         let paint = Color::from_rgba_u8([255, 255, 255, 255]).srgb_to_linear();
 
         let empty = Text::new(Scale::default(), "Noto Sans", 100.0, 400.0, 0.0, 0.0, "")?;
@@ -1640,7 +1630,7 @@ mod tests {
         let text = Text::new(Scale::default(), "Noto Sans", 100.0, 400.0, -5.0, -5.0, "N")?;
         assert!(text.viewport.logical_width() > 0.0 && text.viewport.logical_height() > 0.0);
 
-        let mut image = Image::transparent(200.0, 200.0, Scale::default())?;
+        let mut image = Image::new(Scale::default(), 200.0, 200.0, Color::TRANSPARENT)?;
         let paint = Color::from_rgba_u8([200, 30, 60, 255]).srgb_to_linear();
         image.fill_text(&text, paint)?;
 

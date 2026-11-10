@@ -7,7 +7,14 @@ pub struct Color {
 }
 
 impl Color {
-    pub fn from_rgba_u8(pixel: [u8; 4]) -> Self {
+    pub const TRANSPARENT: Self = Self {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+        a: 0.0,
+    };
+
+    pub const fn from_rgba_u8(pixel: [u8; 4]) -> Self {
         Self {
             r: pixel[0] as f32 / 255.0,
             g: pixel[1] as f32 / 255.0,
@@ -34,7 +41,7 @@ impl Color {
         }
     }
 
-    pub fn to_rgba_u8(self) -> [u8; 4] {
+    pub const fn to_rgba_u8(self) -> [u8; 4] {
         [
             encode_u8(self.r),
             encode_u8(self.g),
@@ -43,7 +50,7 @@ impl Color {
         ]
     }
 
-    pub fn premultiply(self) -> Self {
+    pub const fn premultiply(self) -> Self {
         Self {
             r: self.r * self.a,
             g: self.g * self.a,
@@ -52,7 +59,7 @@ impl Color {
         }
     }
 
-    pub fn demultiply(self) -> Self {
+    pub const fn demultiply(self) -> Self {
         if self.a == 0.0 {
             return Self {
                 r: 0.0,
@@ -70,7 +77,7 @@ impl Color {
         }
     }
 
-    pub fn over(self, layer: Color) -> Color {
+    pub const fn over(self, layer: Color) -> Color {
         let retain = 1.0 - layer.a;
 
         Color {
@@ -99,7 +106,7 @@ pub fn linear_to_srgb(linear: f32) -> f32 {
     }
 }
 
-pub fn encode_u8(stored: f32) -> u8 {
+pub const fn encode_u8(stored: f32) -> u8 {
     (stored * 255.0).round() as u8
 }
 

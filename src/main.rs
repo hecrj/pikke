@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 
 use anywho::anywho;
 
+pub use color::Color;
 pub use engine::Engine;
 pub use error::Error;
 pub use image::Image;

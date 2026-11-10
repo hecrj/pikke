@@ -4,7 +4,7 @@ use mlua::{
     Lua, MetaMethod, ObjectLike, Result, Table, UserData, UserDataFields, UserDataMethods, Value,
 };
 
-use crate::{Image, Scale};
+use crate::{Color, Image, Scale};
 
 pub struct Stream {
     scale: Scale,
@@ -24,7 +24,8 @@ impl UserData for Stream {
                     return Ok(Value::Nil);
                 }
                 *this.done.borrow_mut() = true;
-                let frame = lua.create_userdata(Image::transparent(1.0, 1.0, this.scale)?)?;
+                let frame =
+                    lua.create_userdata(Image::new(this.scale, 1.0, 1.0, Color::TRANSPARENT)?)?;
                 Ok(frame.to_value())
             },
         );
