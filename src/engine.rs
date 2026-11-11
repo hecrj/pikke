@@ -453,7 +453,7 @@ return {
             Scale::default(),
             32.0,
             32.0,
-            crate::Color::from_rgba_u8([200, 30, 60, 255]).srgb_to_linear(),
+            crate::Color::from_rgba8([200, 30, 60, 255]).to_linear(),
         )
         .unwrap();
         source.write(&data).unwrap();

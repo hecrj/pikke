@@ -1,49 +1,61 @@
+use std::marker::PhantomData;
+
 use mlua::{UserData, UserDataMethods, Value};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Color {
+pub struct Color<Space = Linear, Alpha = Normal> {
     pub r: f32,
     pub g: f32,
     pub b: f32,
     pub a: f32,
+    _space: PhantomData<Space>,
+    _alpha: PhantomData<Alpha>,
 }
 
-impl Color {
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Linear;
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Srgb;
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Normal;
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Premultiplied;
+
+impl<S, N> Color<S, N> {
     pub const TRANSPARENT: Self = Self {
         r: 0.0,
         g: 0.0,
         b: 0.0,
         a: 0.0,
+        _space: PhantomData,
+        _alpha: PhantomData,
     };
+}
 
-    pub const fn from_rgba_u8(pixel: [u8; 4]) -> Self {
+impl Color<Srgb> {
+    pub const fn from_rgba8(pixel: [u8; 4]) -> Self {
         Self {
             r: pixel[0] as f32 / 255.0,
             g: pixel[1] as f32 / 255.0,
             b: pixel[2] as f32 / 255.0,
             a: pixel[3] as f32 / 255.0,
+            _space: PhantomData,
+            _alpha: PhantomData,
         }
     }
 
-    pub fn srgb_to_linear(self) -> Self {
-        Self {
+    pub fn to_linear(self) -> Color<Linear> {
+        Color {
             r: srgb_to_linear(self.r),
             g: srgb_to_linear(self.g),
             b: srgb_to_linear(self.b),
             a: self.a,
+            _space: PhantomData,
+            _alpha: PhantomData,
         }
     }
 
-    pub fn linear_to_srgb(self) -> Self {
-        Self {
-            r: linear_to_srgb(self.r),
-            g: linear_to_srgb(self.g),
-            b: linear_to_srgb(self.b),
-            a: self.a,
-        }
-    }
-
-    pub const fn to_rgba_u8(self) -> [u8; 4] {
+    pub const fn to_rgba8(self) -> [u8; 4] {
         [
             encode_u8(self.r),
             encode_u8(self.g),
@@ -51,42 +63,53 @@ impl Color {
             encode_u8(self.a),
         ]
     }
+}
 
-    pub const fn premultiply(self) -> Self {
-        Self {
-            r: self.r * self.a,
-            g: self.g * self.a,
-            b: self.b * self.a,
-            a: self.a,
-        }
-    }
+impl Color {
+    pub fn with_luma(self, luma: f32) -> Self {
+        let luma = luma.clamp(0.0, 1.0);
+        let current = self.premultiply().luma();
 
-    pub const fn demultiply(self) -> Self {
-        if self.a == 0.0 {
+        if current == 0.0 {
             return Self {
                 r: 0.0,
                 g: 0.0,
                 b: 0.0,
-                a: 0.0,
+                ..self
             };
         }
 
+        let scale = luma / current;
+
         Self {
-            r: self.r / self.a,
-            g: self.g / self.a,
-            b: self.b / self.a,
-            a: self.a,
+            r: self.r * scale,
+            g: self.g * scale,
+            b: self.b * scale,
+            ..self
         }
     }
 
-    pub const fn over(self, layer: Color) -> Color {
-        let retain = 1.0 - layer.a;
-
+    pub fn to_srgb(self) -> Color<Srgb> {
         Color {
-            r: layer.r + self.r * retain,
-            g: layer.g + self.g * retain,
-            b: layer.b + self.b * retain,
-            a: layer.a + self.a * retain,
+            r: linear_to_srgb(self.r),
+            g: linear_to_srgb(self.g),
+            b: linear_to_srgb(self.b),
+            a: self.a,
+            _space: PhantomData,
+            _alpha: PhantomData,
+        }
+    }
+}
+
+impl<S> Color<S> {
+    pub const fn premultiply(self) -> Color<S, Premultiplied> {
+        Color {
+            r: self.r * self.a,
+            g: self.g * self.a,
+            b: self.b * self.a,
+            a: self.a,
+            _space: PhantomData,
+            _alpha: PhantomData,
         }
     }
 
@@ -96,29 +119,77 @@ impl Color {
             g: invert(self.g),
             b: invert(self.b),
             a: self.a,
+            _space: PhantomData,
+            _alpha: PhantomData,
         }
     }
+}
 
-    pub fn with_luma(self, luma: f32) -> Self {
-        let luma = luma.clamp(0.0, 1.0);
-        let current = luma_linear(self.r, self.g, self.b);
-
-        if current == 0.0 {
-            return Self {
+impl<S> Color<S, Premultiplied> {
+    pub const fn demultiply(self) -> Color<S> {
+        if self.a == 0.0 {
+            return Color {
                 r: 0.0,
                 g: 0.0,
                 b: 0.0,
-                a: self.a,
+                a: 0.0,
+                _space: PhantomData,
+                _alpha: PhantomData,
             };
         }
 
-        let scale = luma / current;
+        Color {
+            r: self.r / self.a,
+            g: self.g / self.a,
+            b: self.b / self.a,
+            a: self.a,
+            _space: PhantomData,
+            _alpha: PhantomData,
+        }
+    }
+
+    pub const fn over(self, layer: Self) -> Self {
+        let retain = 1.0 - layer.a;
 
         Self {
-            r: (self.r * scale).clamp(0.0, 1.0),
-            g: (self.g * scale).clamp(0.0, 1.0),
-            b: (self.b * scale).clamp(0.0, 1.0),
-            a: self.a,
+            r: layer.r + self.r * retain,
+            g: layer.g + self.g * retain,
+            b: layer.b + self.b * retain,
+            a: layer.a + self.a * retain,
+            _space: PhantomData,
+            _alpha: PhantomData,
+        }
+    }
+}
+
+impl Color<Linear, Premultiplied> {
+    pub fn from_rgba([r, g, b, a]: [f32; 4]) -> Self {
+        Self {
+            r,
+            g,
+            b,
+            a,
+            _space: PhantomData,
+            _alpha: PhantomData,
+        }
+    }
+
+    pub fn luma(&self) -> f32 {
+        const LUMA_R: f64 = 0.2126;
+        const LUMA_G: f64 = 0.7152;
+        const LUMA_B: f64 = 0.0722;
+
+        LUMA_R as f32 * self.r + LUMA_G as f32 * self.g + LUMA_B as f32 * self.b
+    }
+
+    pub fn scale(self, alpha: f32) -> Self {
+        Self {
+            r: self.r * alpha,
+            g: self.g * alpha,
+            b: self.b * alpha,
+            a: self.a * alpha,
+            _space: PhantomData,
+            _alpha: PhantomData,
         }
     }
 }
@@ -144,9 +215,122 @@ impl UserData for Color {
                     ));
                 }
 
-                Ok(this.srgb_to_linear().with_luma(luma).linear_to_srgb())
+                Ok(this.with_luma(luma))
             },
         );
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Buffer {
+    r: Vec<f32>,
+    g: Vec<f32>,
+    b: Vec<f32>,
+    a: Vec<f32>,
+}
+
+impl Buffer {
+    pub fn new(color: Color<Linear, Premultiplied>, count: usize) -> Self {
+        Self {
+            r: vec![color.r; count],
+            g: vec![color.g; count],
+            b: vec![color.b; count],
+            a: vec![color.a; count],
+        }
+    }
+
+    pub fn from_rgba8(rgba: &[u8]) -> Self {
+        let count = rgba.len() / 4;
+
+        let (mut r, mut g, mut b, mut a) = (
+            Vec::with_capacity(count),
+            Vec::with_capacity(count),
+            Vec::with_capacity(count),
+            Vec::with_capacity(count),
+        );
+
+        for pixel in rgba.as_chunks::<4>().0 {
+            let color = Color::from_rgba8(*pixel).to_linear().premultiply();
+
+            r.push(color.r);
+            g.push(color.g);
+            b.push(color.b);
+            a.push(color.a);
+        }
+
+        Self { r, g, b, a }
+    }
+
+    pub fn at(&self, i: usize) -> Color<Linear, Premultiplied> {
+        Color::from_rgba([self.r[i], self.g[i], self.b[i], self.a[i]])
+    }
+
+    pub fn luma(&self) -> (f32, f32) {
+        let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+        let count = self.r.len();
+
+        for i in 0..count {
+            let luma = self.at(i).luma();
+            lo = lo.min(luma);
+            hi = hi.max(luma);
+        }
+
+        (lo, hi)
+    }
+
+    pub fn resize(&mut self, filter: Filter, width: u16, height: u16, box_w: u16, box_h: u16) {
+        self.r = resize(filter, &self.r, width, height, box_w, box_h);
+        self.g = resize(filter, &self.g, width, height, box_w, box_h);
+        self.b = resize(filter, &self.b, width, height, box_w, box_h);
+        self.a = resize(filter, &self.a, width, height, box_w, box_h);
+    }
+
+    pub fn crop(&mut self, box_w: u16, left: u16, top: u16, target_w: u16, target_h: u16) {
+        self.r = crop(&self.r, box_w, left, top, target_w, target_h);
+        self.g = crop(&self.g, box_w, left, top, target_w, target_h);
+        self.b = crop(&self.b, box_w, left, top, target_w, target_h);
+        self.a = crop(&self.a, box_w, left, top, target_w, target_h);
+    }
+
+    pub fn clamp_alpha(&mut self) {
+        for value in self.a.iter_mut() {
+            *value = value.clamp(0.0, 1.0);
+        }
+    }
+
+    pub fn invert(&mut self) {
+        let count = self.r.len();
+
+        for i in 0..count {
+            let Color { r, g, b, .. } = self.at(i).demultiply().invert().premultiply();
+
+            self.r[i] = r;
+            self.g[i] = g;
+            self.b[i] = b;
+        }
+    }
+
+    pub fn put(&mut self, i: usize, color: Color<Linear, Premultiplied>) {
+        self.r[i] = color.r;
+        self.g[i] = color.g;
+        self.b[i] = color.b;
+        self.a[i] = color.a;
+    }
+
+    pub fn apply(
+        &mut self,
+        f: impl Fn(Color<Linear, Premultiplied>) -> Color<Linear, Premultiplied>,
+    ) {
+        let count = self.r.len();
+
+        for i in 0..count {
+            let Color { r, g, b, a, .. } = f(self.at(i));
+
+            self.r[i] = r;
+            self.g[i] = g;
+            self.b[i] = b;
+            self.a[i] = a;
+        }
     }
 }
 
@@ -173,14 +357,6 @@ pub const fn invert(color: f32) -> f32 {
 
 pub const fn encode_u8(stored: f32) -> u8 {
     (stored * 255.0).round() as u8
-}
-
-const LUMA_R: f64 = 0.2126;
-const LUMA_G: f64 = 0.7152;
-const LUMA_B: f64 = 0.0722;
-
-pub fn luma_linear(r: f32, g: f32, b: f32) -> f32 {
-    LUMA_R as f32 * r + LUMA_G as f32 * g + LUMA_B as f32 * b
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -410,19 +586,14 @@ mod kernels {
 
 #[cfg(test)]
 mod with_luma {
-    use super::{Color, luma_linear};
+    use super::Color;
 
     #[test]
     fn the_with_luma_hits_the_target_and_keeps_the_ratios() {
-        let color = Color {
-            r: 0.5,
-            g: 0.25,
-            b: 0.125,
-            a: 1.0,
-        };
+        let color = Color::from_rgba([0.5, 0.25, 0.125, 1.0]).demultiply();
         let result = color.with_luma(0.1);
 
-        assert!((luma_linear(result.r, result.g, result.b) - 0.1).abs() < 1e-6);
+        assert!((result.premultiply().luma() - 0.1).abs() < 1e-6);
         assert_eq!(result.g, result.r / 2.0);
         assert_eq!(result.b, result.r / 4.0);
         assert_eq!(result.a, 1.0);
@@ -430,45 +601,24 @@ mod with_luma {
 
     #[test]
     fn the_with_luma_keeps_black_black() {
-        let black = Color {
-            r: 0.0,
-            g: 0.0,
-            b: 0.0,
-            a: 1.0,
-        };
+        let black = Color::from_rgba([0.0, 0.0, 0.0, 1.0]).demultiply();
 
         assert_eq!(black.with_luma(0.5), black);
     }
 
     #[test]
-    fn the_with_luma_clamps_the_channels() {
-        let result = Color {
-            r: 0.0,
-            g: 0.0,
-            b: 1.0,
-            a: 1.0,
-        }
-        .with_luma(0.3);
+    fn the_with_luma_keeps_the_channels_unclamped_until_the_srgb_encode() {
+        let result = Color::from_rgba([0.0, 0.0, 1.0, 1.0])
+            .demultiply()
+            .with_luma(0.3);
 
-        assert_eq!(
-            result,
-            Color {
-                r: 0.0,
-                g: 0.0,
-                b: 1.0,
-                a: 1.0
-            }
-        );
+        assert!(result.b > 1.0);
+        assert_eq!(result.to_srgb().to_rgba8(), [0, 0, 255, 255]);
     }
 
     #[test]
     fn the_with_luma_clamps_the_target_to_zero_and_one() {
-        let white = Color {
-            r: 1.0,
-            g: 1.0,
-            b: 1.0,
-            a: 1.0,
-        };
+        let white = Color::from_rgba([1.0, 1.0, 1.0, 1.0]).demultiply();
 
         assert_eq!(white.with_luma(-1.0).r, 0.0);
         assert_eq!(white.with_luma(2.0), white);
@@ -478,7 +628,7 @@ mod with_luma {
     fn the_with_luma_binding_scales_a_color() {
         let lua = mlua::Lua::new();
         let color = lua
-            .create_userdata(Color::from_rgba_u8([128, 128, 128, 255]))
+            .create_userdata(Color::from_rgba8([128, 128, 128, 255]).to_linear())
             .unwrap();
 
         let env = lua.create_table().unwrap();
@@ -490,7 +640,7 @@ mod with_luma {
             .eval()
             .unwrap();
         let result = *result.borrow::<Color>().unwrap();
-        assert_eq!(result.to_rgba_u8(), [0, 0, 0, 255]);
+        assert_eq!(result.to_srgb().to_rgba8(), [0, 0, 0, 255]);
 
         let result: mlua::AnyUserData = lua
             .load("color:with_luma(1.0)")
@@ -498,7 +648,7 @@ mod with_luma {
             .eval()
             .unwrap();
         let result = *result.borrow::<Color>().unwrap();
-        assert_eq!(result.to_rgba_u8(), [255, 255, 255, 255]);
+        assert_eq!(result.to_srgb().to_rgba8(), [255, 255, 255, 255]);
 
         let result: mlua::AnyUserData = lua
             .load("color:with_luma(0.215744)")
@@ -506,7 +656,7 @@ mod with_luma {
             .eval()
             .unwrap();
         let result = *result.borrow::<Color>().unwrap();
-        assert_eq!(result.to_rgba_u8(), [128, 128, 128, 255]);
+        assert_eq!(result.to_srgb().to_rgba8(), [128, 128, 128, 255]);
 
         let error = lua
             .load("color:with_luma('x')")

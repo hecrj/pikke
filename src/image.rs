@@ -17,17 +17,9 @@ use crate::{Color, Error, Path, Rectangle, Result, Scale, Text, Viewport};
 
 #[derive(Debug, Clone)]
 pub struct Image {
-    buffer: Arc<Buffer>,
+    buffer: Arc<color::Buffer>,
     viewport: Viewport,
     target_scale: Scale,
-}
-
-#[derive(Debug, Clone)]
-struct Buffer {
-    r: Vec<f32>,
-    g: Vec<f32>,
-    b: Vec<f32>,
-    a: Vec<f32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -51,12 +43,7 @@ impl Image {
         let color = color.premultiply();
 
         Ok(Self {
-            buffer: Arc::new(Buffer {
-                r: vec![color.r; count],
-                g: vec![color.g; count],
-                b: vec![color.b; count],
-                a: vec![color.a; count],
-            }),
+            buffer: Arc::new(color::Buffer::new(color, count)),
             viewport,
             target_scale: scale,
         })
@@ -74,10 +61,8 @@ impl Image {
             });
         }
 
-        let (r, g, b, a) = decode_rgba8(rgba);
-
         Ok(Self {
-            buffer: Arc::new(Buffer { r, g, b, a }),
+            buffer: Arc::new(color::Buffer::from_rgba8(rgba)),
             viewport,
             target_scale: viewport.scale(),
         })
@@ -85,12 +70,10 @@ impl Image {
 
     fn load(path: impl AsRef<path::Path>, target_scale: Scale) -> Result<Self> {
         let rgba = image::open(path)?.to_rgba8();
-
         let (width, height) = (rgba.width(), rgba.height());
-        let (r, g, b, a) = decode_rgba8(&rgba);
 
         Ok(Self {
-            buffer: Arc::new(Buffer { r, g, b, a }),
+            buffer: Arc::new(color::Buffer::from_rgba8(&rgba)),
             viewport: Viewport::from_physical_u32(width, height, Scale::default())?,
             target_scale,
         })
@@ -117,15 +100,7 @@ impl Image {
         let mut out = Vec::with_capacity(count * 4);
 
         for i in 0..count {
-            let color = Color {
-                r: self.buffer.r[i],
-                g: self.buffer.g[i],
-                b: self.buffer.b[i],
-                a: self.buffer.a[i],
-            }
-            .demultiply()
-            .linear_to_srgb()
-            .to_rgba_u8();
+            let color = self.buffer.at(i).demultiply().to_srgb().to_rgba8();
             out.extend_from_slice(&color);
         }
 
@@ -179,25 +154,17 @@ impl Image {
         if resized {
             let (width, height) = (self.viewport.width(), self.viewport.height());
 
-            buffer.r = color::resize(filter, &buffer.r, width, height, box_w, box_h);
-            buffer.g = color::resize(filter, &buffer.g, width, height, box_w, box_h);
-            buffer.b = color::resize(filter, &buffer.b, width, height, box_w, box_h);
-            buffer.a = color::resize(filter, &buffer.a, width, height, box_w, box_h);
+            buffer.resize(filter, width, height, box_w, box_h);
         }
 
         if left != 0 || top != 0 {
             let (target_w, target_h) = (new_viewport.width(), new_viewport.height());
 
-            buffer.r = color::crop(&buffer.r, box_w, left, top, target_w, target_h);
-            buffer.g = color::crop(&buffer.g, box_w, left, top, target_w, target_h);
-            buffer.b = color::crop(&buffer.b, box_w, left, top, target_w, target_h);
-            buffer.a = color::crop(&buffer.a, box_w, left, top, target_w, target_h);
+            buffer.crop(box_w, left, top, target_w, target_h);
         }
 
         if resized {
-            for value in buffer.a.iter_mut() {
-                *value = value.clamp(0.0, 1.0);
-            }
+            buffer.clamp_alpha();
         }
 
         self.viewport = new_viewport;
@@ -206,14 +173,7 @@ impl Image {
     }
 
     pub fn autocontrast(&mut self) {
-        let count = self.viewport.total_pixels();
-        let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
-
-        for i in 0..count {
-            let luma = color::luma_linear(self.buffer.r[i], self.buffer.g[i], self.buffer.b[i]);
-            lo = lo.min(luma);
-            hi = hi.max(luma);
-        }
+        let (lo, hi) = self.buffer.luma();
 
         if hi <= lo {
             return;
@@ -230,32 +190,17 @@ impl Image {
             }
         };
 
-        for i in 0..count {
-            buffer.r[i] = stretch(buffer.r[i]);
-            buffer.g[i] = stretch(buffer.g[i]);
-            buffer.b[i] = stretch(buffer.b[i]);
-        }
+        buffer.apply(|mut color| {
+            color.r = stretch(color.r);
+            color.g = stretch(color.g);
+            color.b = stretch(color.b);
+            color
+        });
     }
 
     pub fn invert(&mut self) {
-        let count = self.viewport.total_pixels();
         let buffer = Arc::make_mut(&mut self.buffer);
-
-        for i in 0..count {
-            let Color { r, g, b, .. } = Color {
-                r: buffer.r[i],
-                g: buffer.g[i],
-                b: buffer.b[i],
-                a: buffer.a[i],
-            }
-            .demultiply()
-            .invert()
-            .premultiply();
-
-            buffer.r[i] = r;
-            buffer.g[i] = g;
-            buffer.b[i] = b;
-        }
+        buffer.invert();
     }
 
     pub fn blend(&mut self, other: &Image, at: Rectangle, space: color::Space) -> Result<()> {
@@ -291,46 +236,28 @@ impl Image {
         }
 
         let buffer = Arc::make_mut(&mut self.buffer);
-        let (base_r, base_g, base_b, base_a) =
-            (&mut buffer.r, &mut buffer.g, &mut buffer.b, &mut buffer.a);
-        let (layer_r, layer_g, layer_b, layer_a) = (
-            &other.buffer.r,
-            &other.buffer.g,
-            &other.buffer.b,
-            &other.buffer.a,
-        );
 
         for y in top..bottom {
             for x in left..right {
                 let i = (y * self.viewport.width() as i32 + x) as usize;
                 let j = ((y - at_y) * other.viewport.width() as i32 + (x - at_x)) as usize;
 
-                let base = Color {
-                    r: base_r[i],
-                    g: base_g[i],
-                    b: base_b[i],
-                    a: base_a[i],
-                };
-
-                let layer = Color {
-                    r: layer_r[j],
-                    g: layer_g[j],
-                    b: layer_b[j],
-                    a: layer_a[j],
-                };
+                let base = buffer.at(i);
+                let layer = other.buffer.at(j);
 
                 let blended = match space {
                     color::Space::Linear => base.over(layer),
                     color::Space::Srgb => base
-                        .linear_to_srgb()
-                        .over(layer.linear_to_srgb())
-                        .srgb_to_linear(),
+                        .demultiply()
+                        .to_srgb()
+                        .premultiply()
+                        .over(layer.demultiply().to_srgb().premultiply())
+                        .demultiply()
+                        .to_linear()
+                        .premultiply(),
                 };
 
-                base_r[i] = blended.r;
-                base_g[i] = blended.g;
-                base_b[i] = blended.b;
-                base_a[i] = blended.a;
+                buffer.put(i, blended);
             }
         }
 
@@ -377,29 +304,16 @@ impl Image {
         context.render(&mut pixmap, &mut resources);
 
         let buffer = Arc::make_mut(&mut self.buffer);
-        let (base_r, base_g, base_b, base_a) =
-            (&mut buffer.r, &mut buffer.g, &mut buffer.b, &mut buffer.a);
+        let paint = paint.premultiply();
 
         for (i, pixel) in pixmap.data().iter().enumerate() {
             let cover = pixel.a as f32 / 255.0;
+
             if cover > 0.0 {
-                let base = Color {
-                    r: base_r[i],
-                    g: base_g[i],
-                    b: base_b[i],
-                    a: base_a[i],
-                };
-                let layer = Color {
-                    r: paint.r * cover,
-                    g: paint.g * cover,
-                    b: paint.b * cover,
-                    a: cover,
-                };
-                let blended = base.over(layer);
-                base_r[i] = blended.r;
-                base_g[i] = blended.g;
-                base_b[i] = blended.b;
-                base_a[i] = blended.a;
+                let base = buffer.at(i);
+                let layer = paint.scale(cover);
+
+                buffer.put(i, base.over(layer));
             }
         }
     }
@@ -474,8 +388,7 @@ impl Image {
         context.render(&mut pixmap, &mut resources);
 
         let buffer = Arc::make_mut(&mut self.buffer);
-        let (base_r, base_g, base_b, base_a) =
-            (&mut buffer.r, &mut buffer.g, &mut buffer.b, &mut buffer.a);
+        let paint = paint.premultiply();
 
         for (y, row) in pixmap
             .data()
@@ -504,29 +417,20 @@ impl Image {
                 }
 
                 let i = (canvas_y * self.viewport.width() as i32 + canvas_x) as usize;
-                let base = Color {
-                    r: base_r[i],
-                    g: base_g[i],
-                    b: base_b[i],
-                    a: base_a[i],
-                };
+                let base = buffer.at(i);
 
-                let layer = Color {
-                    r: paint.r * cover,
-                    g: paint.g * cover,
-                    b: paint.b * cover,
-                    a: cover,
-                };
+                let layer = paint.scale(cover);
 
                 let blended = base
-                    .linear_to_srgb()
-                    .over(layer.linear_to_srgb())
-                    .srgb_to_linear();
+                    .demultiply()
+                    .to_srgb()
+                    .premultiply()
+                    .over(layer.demultiply().to_srgb().premultiply())
+                    .demultiply()
+                    .to_linear()
+                    .premultiply();
 
-                base_r[i] = blended.r;
-                base_g[i] = blended.g;
-                base_b[i] = blended.b;
-                base_a[i] = blended.a;
+                buffer.put(i, blended);
             }
         }
 
@@ -549,13 +453,12 @@ impl Image {
             return Ok(0.0);
         }
 
-        let (r, g, b) = (&self.buffer.r, &self.buffer.g, &self.buffer.b);
         let mut luma = 0.0f32;
 
         for y in top..bottom {
             for x in left..right {
                 let i = (y * self.width() as i32 + x) as usize;
-                luma += color::luma_linear(r[i], g[i], b[i]);
+                luma += self.buffer.at(i).luma();
             }
         }
 
@@ -587,34 +490,28 @@ impl Image {
             return Ok(Color::TRANSPARENT);
         }
 
-        let (r, g, b, a) = (
-            &self.buffer.r,
-            &self.buffer.g,
-            &self.buffer.b,
-            &self.buffer.a,
-        );
         let mut buckets = vec![Bucket::default(); 16 * 16 * 16];
 
         for y in top..bottom {
             for x in left..right {
                 let i = (y * self.width() as i32 + x) as usize;
-                let alpha = a[i];
+                let color = self.buffer.at(i);
 
-                if alpha > 0.0 {
-                    let r = r[i] / alpha;
-                    let g = g[i] / alpha;
-                    let b = b[i] / alpha;
+                if color.a > 0.0 {
+                    let r = color.r / color.a;
+                    let g = color.g / color.a;
+                    let b = color.b / color.a;
 
                     let index = (r * 15.0).round() as usize
                         + (g * 15.0).round() as usize * 16
                         + (b * 15.0).round() as usize;
 
                     let bucket = &mut buckets[index];
-                    bucket.weight += alpha;
-                    bucket.r += r * alpha;
-                    bucket.g += g * alpha;
-                    bucket.b += b * alpha;
-                    bucket.a += alpha * alpha;
+                    bucket.weight += color.a;
+                    bucket.r += r * color.a;
+                    bucket.g += g * color.a;
+                    bucket.b += b * color.a;
+                    bucket.a += color.a * color.a;
                 }
             }
         }
@@ -636,12 +533,15 @@ impl Image {
             return Ok(Color::TRANSPARENT);
         }
 
-        Ok(Color {
-            r: bucket.r / bucket.weight,
-            g: bucket.g / bucket.weight,
-            b: bucket.b / bucket.weight,
-            a: bucket.a / bucket.weight,
-        })
+        let alpha = bucket.a / bucket.weight;
+
+        Ok(Color::from_rgba([
+            bucket.r / bucket.weight * alpha,
+            bucket.g / bucket.weight * alpha,
+            bucket.b / bucket.weight * alpha,
+            alpha,
+        ])
+        .demultiply())
     }
 
     pub fn write(&self, output: &path::Path) -> Result<()> {
@@ -912,28 +812,6 @@ impl From<Path> for Geometry {
     }
 }
 
-fn decode_rgba8(rgba: &[u8]) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
-    let count = rgba.len() / 4;
-
-    let (mut r, mut g, mut b, mut a) = (
-        Vec::with_capacity(count),
-        Vec::with_capacity(count),
-        Vec::with_capacity(count),
-        Vec::with_capacity(count),
-    );
-
-    for pixel in rgba.as_chunks::<4>().0 {
-        let color = Color::from_rgba_u8(*pixel).srgb_to_linear().premultiply();
-
-        r.push(color.r);
-        g.push(color.g);
-        b.push(color.b);
-        a.push(color.a);
-    }
-
-    (r, g, b, a)
-}
-
 struct PathPen {
     path: BezPath,
 }
@@ -993,12 +871,7 @@ fn color_from_hex(operation: &str, color: &str) -> mlua::Result<Color> {
             .map_err(|_| mlua::Error::RuntimeError(message()))
     };
 
-    Ok(Color::from_rgba_u8([
-        channel(0)?,
-        channel(2)?,
-        channel(4)?,
-        255,
-    ]))
+    Ok(Color::from_rgba8([channel(0)?, channel(2)?, channel(4)?, 255]).to_linear())
 }
 
 impl UserData for Reference {
@@ -1119,8 +992,7 @@ impl UserData for Reference {
                         "fill: the color must be a `Color`, or a hex string (was {})",
                         color.type_name()
                     )));
-                }
-                .srgb_to_linear();
+                };
 
                 if let Ok(rectangle) = region.borrow::<Rectangle>() {
                     this.fill(*rectangle, paint);
@@ -1153,7 +1025,7 @@ impl UserData for Reference {
             "dominant_in",
             |_lua, this, region: AnyUserData| -> mlua::Result<Color> {
                 let region: Rectangle = *region.borrow::<Rectangle>()?;
-                Ok(this.dominant_in(region)?.linear_to_srgb())
+                Ok(this.dominant_in(region)?)
             },
         );
     }
@@ -1193,7 +1065,7 @@ pub fn install(lua: &Lua, env: &Table, script_dir: &path::Path, scale: Scale) ->
             }
 
             let paint = if let Some(color) = color {
-                color_from_hex("blank", &color)?.srgb_to_linear()
+                color_from_hex("blank", &color)?
             } else {
                 Color::TRANSPARENT
             };
@@ -1211,7 +1083,7 @@ mod tests {
 
     use mlua::{AnyUserData, Function, Lua, Table};
 
-    use super::{Buffer, Dimension, Image, Mode, Reference, install};
+    use super::{Dimension, Image, Mode, Reference, install};
     use crate::color;
     use crate::text::Text;
     use crate::{Color, Rectangle, Result, Scale, Viewport};
@@ -1232,19 +1104,12 @@ mod tests {
 
         let count = (file_width * file_height) as usize;
 
-        for plane in [
-            &image.buffer.r,
-            &image.buffer.g,
-            &image.buffer.b,
-            &image.buffer.a,
-        ] {
-            assert_eq!(plane.len(), count);
-        }
+        assert_eq!(image.to_rgba8().len(), count * 4);
     }
 
     #[test]
     fn the_blank_paints_the_whole_canvas() -> Result<()> {
-        let paint = Color::from_rgba_u8([200, 30, 60, 255]).srgb_to_linear();
+        let paint = Color::from_rgba8([200, 30, 60, 255]).to_linear();
         let image = Image::new(Scale::default(), 4.0, 2.0, paint)?;
 
         assert_eq!((image.width(), image.height()), (4, 2));
@@ -1257,11 +1122,11 @@ mod tests {
 
     #[test]
     fn the_blank_sizes_its_buffer_at_the_run_scale() -> Result<()> {
-        let paint = Color::from_rgba_u8([255, 255, 255, 255]).srgb_to_linear();
+        let paint = Color::from_rgba8([255, 255, 255, 255]).to_linear();
         let image = Image::new(Scale::new(0.5), 300.0, 100.0, paint)?;
 
         assert_eq!((image.width(), image.height()), (150, 50));
-        assert_eq!(image.buffer.r.len(), 150 * 50);
+        assert_eq!(image.to_rgba8().len(), 150 * 50 * 4);
         assert_eq!(
             (image.logical_width(), image.logical_height()),
             (300.0, 100.0)
@@ -1339,7 +1204,7 @@ mod tests {
     fn resize_lands_on_its_targets_and_forks() -> Result<()> {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("images/Lenna.png");
         let mut image = Image::load(&path, Scale::new(0.5)).unwrap();
-        let first_pixel = image.buffer.r[0];
+        let first_pixel = image.buffer.at(0).r;
 
         let mut fork = image.clone();
 
@@ -1355,7 +1220,7 @@ mod tests {
         assert_eq!((image.width(), image.height()), (100, 125));
 
         assert_eq!((fork.width(), fork.height()), (512, 512));
-        assert_eq!(fork.buffer.r[0], first_pixel);
+        assert_eq!(fork.buffer.at(0).r, first_pixel);
 
         fork.resize(
             Dimension::Both {
@@ -1390,15 +1255,10 @@ mod tests {
 
     #[test]
     fn the_resize_keeps_a_constant_plane_constant() -> Result<()> {
-        let expected = Color {
-            r: 0.5,
-            g: 0.5,
-            b: 0.5,
-            a: 1.0,
-        }
-        .demultiply()
-        .linear_to_srgb()
-        .to_rgba_u8();
+        let expected = Color::from_rgba([0.5, 0.5, 0.5, 1.0])
+            .demultiply()
+            .to_srgb()
+            .to_rgba8();
 
         for filter in [color::Filter::Cubic, color::Filter::Lanczos] {
             for target in [4.0, 16.0] {
@@ -1423,7 +1283,7 @@ mod tests {
 
     #[test]
     fn the_resize_keeps_the_aspect_for_a_single_dimension() -> Result<()> {
-        let color = Color::from_rgba_u8([200, 30, 60, 255]).srgb_to_linear();
+        let color = Color::from_rgba8([200, 30, 60, 255]).to_linear();
 
         let mut image = Image::new(Scale::default(), 64.0, 32.0, color)?;
         image.resize(
@@ -1457,16 +1317,17 @@ mod tests {
         let r: [f32; 16] = [
             0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 0.0, 0.1, 0.2, 0.3, 0.4, 0.5,
         ];
-        let image = Image {
-            buffer: Arc::new(Buffer {
-                r: r.to_vec(),
-                g: vec![0.5; 16],
-                b: vec![0.6; 16],
-                a: vec![1.0; 16],
-            }),
+        let mut image = Image {
+            buffer: Arc::new(color::Buffer::new(Color::TRANSPARENT, 16)),
             viewport: Viewport::from_physical_u32(4, 4, Scale::default())?,
             target_scale: Scale::default(),
         };
+        {
+            let buffer = Arc::make_mut(&mut image.buffer);
+            for (i, &channel) in r.iter().enumerate() {
+                buffer.put(i, Color::from_rgba([channel, 0.5, 0.6, 1.0]));
+            }
+        }
 
         let luma = |r: f32| 0.2126 * r as f64 + 0.7152 * 0.5 + 0.0722 * 0.6;
         let mean = |indices: &[usize]| {
@@ -1519,10 +1380,9 @@ mod tests {
 
         let luma = image.luma_in(Rectangle::new(10.0, 20.0, 100.0, 50.0))?;
 
-        let (r, g, b) = (&image.buffer.r, &image.buffer.g, &image.buffer.b);
         let sum: f32 = (20..70)
             .flat_map(|y| (10..110).map(move |x| y * 512 + x))
-            .map(|i| color::luma_linear(r[i], g[i], b[i]))
+            .map(|i| image.buffer.at(i).luma())
             .sum();
         let expected = sum / 5000.0 * 255.0;
         assert!((luma - expected).abs() < 1e-2);
@@ -1556,7 +1416,7 @@ mod tests {
 
         let dominant = image.dominant_in(Rectangle::new(0.0, 0.0, 4.0, 4.0))?;
 
-        assert_eq!(dominant.linear_to_srgb().to_rgba_u8(), [200, 30, 60, 255]);
+        assert_eq!(dominant.to_srgb().to_rgba8(), [200, 30, 60, 255]);
 
         Ok(())
     }
@@ -1569,7 +1429,7 @@ mod tests {
 
         let dominant = image.dominant_in(Rectangle::new(0.0, 0.0, 2.0, 1.0))?;
 
-        assert_eq!(dominant.linear_to_srgb().to_rgba_u8(), [201, 31, 61, 255]);
+        assert_eq!(dominant.to_srgb().to_rgba8(), [201, 31, 61, 255]);
 
         Ok(())
     }
@@ -1582,7 +1442,7 @@ mod tests {
 
         let dominant = image.dominant_in(Rectangle::new(0.0, 0.0, 2.0, 2.0))?;
 
-        assert_eq!(dominant.linear_to_srgb().to_rgba_u8(), [0, 255, 0, 255]);
+        assert_eq!(dominant.to_srgb().to_rgba8(), [0, 255, 0, 255]);
 
         Ok(())
     }
@@ -1604,29 +1464,24 @@ mod tests {
     }
 
     fn synthetic_linear(pixels: &[[f32; 4]], scale: Scale) -> Result<Image> {
-        let plane = |channel: usize| pixels.iter().map(|pixel| pixel[channel]).collect();
-
-        Ok(Image {
-            buffer: Arc::new(Buffer {
-                r: plane(0),
-                g: plane(1),
-                b: plane(2),
-                a: plane(3),
-            }),
-            viewport: Viewport::from_physical_u32(pixels.len() as u32, 1, scale)?,
+        let count = pixels.len();
+        let mut image = Image {
+            buffer: Arc::new(color::Buffer::new(Color::TRANSPARENT, count)),
+            viewport: Viewport::from_physical_u32(count as u32, 1, scale)?,
             target_scale: scale,
-        })
+        };
+        let buffer = Arc::make_mut(&mut image.buffer);
+        for (i, pixel) in pixels.iter().enumerate() {
+            buffer.put(i, Color::from_rgba(*pixel));
+        }
+
+        Ok(image)
     }
 
     fn square(color: [f32; 4], size: u32, scale: Scale) -> Result<Image> {
         let count = (size * size) as usize;
         Ok(Image {
-            buffer: Arc::new(Buffer {
-                r: vec![color[0]; count],
-                g: vec![color[1]; count],
-                b: vec![color[2]; count],
-                a: vec![color[3]; count],
-            }),
+            buffer: Arc::new(color::Buffer::new(Color::from_rgba(color), count)),
             viewport: Viewport::from_physical_u32(size, size, scale)?,
             target_scale: scale,
         })
@@ -1644,15 +1499,15 @@ mod tests {
         let mut image = synthetic_linear(&pixels, Scale::default())?;
         image.autocontrast();
 
-        let lo = color::luma_linear(0.3, 0.3, 0.3);
-        let hi = color::luma_linear(0.7, 0.7, 0.7);
+        let lo = Color::from_rgba([0.3, 0.3, 0.3, 1.0]).luma();
+        let hi = Color::from_rgba([0.7, 0.7, 0.7, 1.0]).luma();
         let scale = 1.0 / (hi - lo);
 
         for (i, pixel) in pixels.iter().enumerate() {
             for (value, stretched) in [
-                (pixel[0], image.buffer.r[i]),
-                (pixel[1], image.buffer.g[i]),
-                (pixel[2], image.buffer.b[i]),
+                (pixel[0], image.buffer.at(i).r),
+                (pixel[1], image.buffer.at(i).g),
+                (pixel[2], image.buffer.at(i).b),
             ] {
                 let expected = if value < lo || value > hi {
                     value
@@ -1663,12 +1518,12 @@ mod tests {
             }
         }
 
-        assert!((image.buffer.r[1] - 0.5).abs() <= 1e-5);
+        assert!((image.buffer.at(1).r - 0.5).abs() <= 1e-5);
 
-        assert_eq!(image.buffer.r[3], 1.0);
-        assert_eq!(image.buffer.g[3], 0.12);
-        assert_eq!(image.buffer.b[3], 0.12);
-        assert_eq!(image.buffer.a[3], 1.0);
+        assert_eq!(image.buffer.at(3).r, 1.0);
+        assert_eq!(image.buffer.at(3).g, 0.12);
+        assert_eq!(image.buffer.at(3).b, 0.12);
+        assert_eq!(image.buffer.at(3).a, 1.0);
 
         Ok(())
     }
@@ -1681,9 +1536,9 @@ mod tests {
         image.autocontrast();
 
         for i in 0..3 {
-            assert_eq!(image.buffer.r[i], 0.4);
-            assert_eq!(image.buffer.g[i], 0.3);
-            assert_eq!(image.buffer.b[i], 0.5);
+            assert_eq!(image.buffer.at(i).r, 0.4);
+            assert_eq!(image.buffer.at(i).g, 0.3);
+            assert_eq!(image.buffer.at(i).b, 0.5);
         }
 
         Ok(())
@@ -1695,15 +1550,11 @@ mod tests {
         let mut image = Image::load(&path, Scale::default()).unwrap();
 
         let count = image.viewport.total_pixels();
-        let (r, g, b) = (
-            image.buffer.r.clone(),
-            image.buffer.g.clone(),
-            image.buffer.b.clone(),
-        );
+        let before: Vec<_> = (0..count).map(|i| image.buffer.at(i)).collect();
 
         let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
-        for i in 0..count {
-            let luma = color::luma_linear(r[i], g[i], b[i]);
+        for value in &before {
+            let luma = value.luma();
             lo = lo.min(luma);
             hi = hi.max(luma);
         }
@@ -1714,10 +1565,12 @@ mod tests {
         let scale = 1.0 / (hi - lo);
 
         for i in 0..count {
+            let (before, after) = (before[i], image.buffer.at(i));
+
             for (value, stretched) in [
-                (r[i], image.buffer.r[i]),
-                (g[i], image.buffer.g[i]),
-                (b[i], image.buffer.b[i]),
+                (before.r, after.r),
+                (before.g, after.g),
+                (before.b, after.b),
             ] {
                 let expected = if value < lo || value > hi {
                     value
@@ -1748,10 +1601,22 @@ mod tests {
         ];
 
         for (i, expected) in expected.iter().enumerate() {
-            assert!((image.buffer.r[i] - expected[0]).abs() < 1e-6, "pixel {i}");
-            assert!((image.buffer.g[i] - expected[1]).abs() < 1e-6, "pixel {i}");
-            assert!((image.buffer.b[i] - expected[2]).abs() < 1e-6, "pixel {i}");
-            assert!((image.buffer.a[i] - expected[3]).abs() < 1e-6, "pixel {i}");
+            assert!(
+                (image.buffer.at(i).r - expected[0]).abs() < 1e-6,
+                "pixel {i}"
+            );
+            assert!(
+                (image.buffer.at(i).g - expected[1]).abs() < 1e-6,
+                "pixel {i}"
+            );
+            assert!(
+                (image.buffer.at(i).b - expected[2]).abs() < 1e-6,
+                "pixel {i}"
+            );
+            assert!(
+                (image.buffer.at(i).a - expected[3]).abs() < 1e-6,
+                "pixel {i}"
+            );
         }
 
         Ok(())
@@ -1796,12 +1661,12 @@ mod tests {
         let (base_width, base_height) = (base.width() as usize, base.height() as usize);
         let layer_width = layer.width() as usize;
 
-        let (base_r, base_g, base_b, base_a) = (
-            base.buffer.r.clone(),
-            base.buffer.g.clone(),
-            base.buffer.b.clone(),
-            base.buffer.a.clone(),
-        );
+        let base_pixels: Vec<_> = (0..base_width * base_height)
+            .map(|i| base.buffer.at(i))
+            .collect();
+        let layer_pixels: Vec<_> = (0..layer.width() as usize * layer.height() as usize)
+            .map(|i| layer.buffer.at(i))
+            .collect();
 
         base.blend(&layer, Rectangle::default(), color::Space::Linear)?;
 
@@ -1810,21 +1675,11 @@ mod tests {
             for x in 0..base_width {
                 let i = y * base_width + x;
                 let j = y * layer_width + x;
-                let expected = Color {
-                    r: base_r[i],
-                    g: base_g[i],
-                    b: base_b[i],
-                    a: base_a[i],
-                }
-                .over(Color {
-                    r: layer.buffer.r[j],
-                    g: layer.buffer.g[j],
-                    b: layer.buffer.b[j],
-                    a: layer.buffer.a[j],
-                })
-                .demultiply()
-                .linear_to_srgb()
-                .to_rgba_u8();
+                let expected = base_pixels[i]
+                    .over(layer_pixels[j])
+                    .demultiply()
+                    .to_srgb()
+                    .to_rgba8();
                 assert_eq!(&actual[i * 4..i * 4 + 4], &expected[..]);
             }
         }
@@ -1875,37 +1730,20 @@ mod tests {
         srgb.blend(&layer, Rectangle::default(), color::Space::Srgb)?;
 
         for i in 0..2 {
-            let linear_expected = Color {
-                r: 0.5,
-                g: 0.5,
-                b: 0.5,
-                a: 1.0,
-            }
-            .over(Color {
-                r: 0.5,
-                g: 0.5,
-                b: 0.5,
-                a: 0.5,
-            });
-            let srgb_expected = Color {
-                r: 0.5,
-                g: 0.5,
-                b: 0.5,
-                a: 1.0,
-            }
-            .linear_to_srgb()
-            .over(
-                Color {
-                    r: 0.5,
-                    g: 0.5,
-                    b: 0.5,
-                    a: 0.5,
-                }
-                .linear_to_srgb(),
-            )
-            .srgb_to_linear();
-            assert!((linear.buffer.r[i] - linear_expected.r).abs() <= 1e-6);
-            assert!((srgb.buffer.r[i] - srgb_expected.r).abs() <= 1e-6);
+            let opaque = Color::from_rgba([0.5, 0.5, 0.5, 1.0]);
+            let half = Color::from_rgba([0.5, 0.5, 0.5, 0.5]);
+
+            let linear_expected = opaque.over(half);
+            let srgb_expected = opaque
+                .demultiply()
+                .to_srgb()
+                .premultiply()
+                .over(half.demultiply().to_srgb().premultiply())
+                .demultiply()
+                .to_linear()
+                .premultiply();
+            assert!((linear.buffer.at(i).r - linear_expected.r).abs() <= 1e-6);
+            assert!((srgb.buffer.at(i).r - srgb_expected.r).abs() <= 1e-6);
             assert!((linear_expected.r - srgb_expected.r).abs() > 0.01);
         }
 
@@ -1938,7 +1776,7 @@ mod tests {
     #[test]
     fn the_fill_paints_an_aligned_region_exactly() -> Result<()> {
         let mut image = Image::new(Scale::default(), 8.0, 8.0, Color::TRANSPARENT)?;
-        let paint = Color::from_rgba_u8([128, 160, 192, 255]).srgb_to_linear();
+        let paint = Color::from_rgba8([128, 160, 192, 255]).to_linear();
 
         image.fill(Rectangle::new(1.0, 2.0, 4.0, 3.0), paint);
 
@@ -1962,7 +1800,7 @@ mod tests {
     #[test]
     fn the_fill_snaps_fractional_edges_to_the_pixel_grid() -> Result<()> {
         let mut image = Image::new(Scale::default(), 4.0, 4.0, Color::TRANSPARENT)?;
-        let paint = Color::from_rgba_u8([255, 0, 0, 255]).srgb_to_linear();
+        let paint = Color::from_rgba8([255, 0, 0, 255]).to_linear();
 
         image.fill(Rectangle::new(0.5, 0.5, 3.0, 3.0), paint);
 
@@ -1972,15 +1810,10 @@ mod tests {
         let painted = image.to_rgba8();
         for (i, coverage) in coverages.iter().enumerate() {
             let cover = *coverage as f32 / 255.0;
-            let expected = Color {
-                r: paint.r * cover,
-                g: 0.0,
-                b: 0.0,
-                a: cover,
-            }
-            .demultiply()
-            .linear_to_srgb()
-            .to_rgba_u8();
+            let expected = Color::from_rgba([paint.r * cover, 0.0, 0.0, cover])
+                .demultiply()
+                .to_srgb()
+                .to_rgba8();
             assert_eq!(&painted[i * 4..i * 4 + 4], &expected);
         }
 
@@ -1990,7 +1823,7 @@ mod tests {
     #[test]
     fn the_fill_snaps_at_the_run_scale() -> Result<()> {
         let mut image = Image::new(Scale::new(0.5), 16.0, 16.0, Color::TRANSPARENT)?;
-        let paint = Color::from_rgba_u8([0, 255, 255, 255]).srgb_to_linear();
+        let paint = Color::from_rgba8([0, 255, 255, 255]).to_linear();
 
         image.fill(Rectangle::new(0.5, 0.5, 3.0, 3.0), paint);
 
@@ -2002,15 +1835,10 @@ mod tests {
         let painted = image.to_rgba8();
         for (i, coverage) in coverages.iter().enumerate() {
             let cover = *coverage as f32 / 255.0;
-            let expected = Color {
-                r: 0.0,
-                g: paint.g * cover,
-                b: paint.b * cover,
-                a: cover,
-            }
-            .demultiply()
-            .linear_to_srgb()
-            .to_rgba_u8();
+            let expected = Color::from_rgba([0.0, paint.g * cover, paint.b * cover, cover])
+                .demultiply()
+                .to_srgb()
+                .to_rgba8();
             assert_eq!(&painted[i * 4..i * 4 + 4], &expected);
         }
 
@@ -2020,7 +1848,7 @@ mod tests {
     #[test]
     fn the_fill_is_a_no_op_for_degenerate_regions() -> Result<()> {
         let mut image = Image::new(Scale::default(), 4.0, 4.0, Color::TRANSPARENT)?;
-        let paint = Color::from_rgba_u8([255, 255, 255, 255]).srgb_to_linear();
+        let paint = Color::from_rgba8([255, 255, 255, 255]).to_linear();
 
         image.fill(Rectangle::new(0.0, 0.0, 0.0, 0.0), paint);
         image.fill(Rectangle::new(0.0, 0.0, -2.0, 2.0), paint);
@@ -2035,7 +1863,7 @@ mod tests {
     #[test]
     fn the_fill_path_paints_the_aligned_path_exactly() -> Result<()> {
         let mut image = Image::new(Scale::default(), 10.0, 10.0, Color::TRANSPARENT)?;
-        let paint = Color::from_rgba_u8([255, 255, 255, 255]).srgb_to_linear();
+        let paint = Color::from_rgba8([255, 255, 255, 255]).to_linear();
 
         let mut path = crate::path::Path::new();
         path.move_to(2.0, 2.0);
@@ -2062,7 +1890,7 @@ mod tests {
     #[test]
     fn the_fill_path_is_a_no_op_for_degenerate_paths() -> Result<()> {
         let mut image = Image::new(Scale::default(), 4.0, 4.0, Color::TRANSPARENT)?;
-        let paint = Color::from_rgba_u8([255, 255, 255, 255]).srgb_to_linear();
+        let paint = Color::from_rgba8([255, 255, 255, 255]).to_linear();
 
         image.fill(crate::path::Path::new(), paint);
 
@@ -2146,8 +1974,8 @@ mod tests {
             .eval::<()>()
             .unwrap();
         let painted = output.borrow::<Reference>().unwrap().image().unwrap();
-        assert!(painted.buffer.r[5] > 0.0);
-        assert_eq!(painted.buffer.a[5], 1.0);
+        assert!(painted.buffer.at(5).r > 0.0);
+        assert_eq!(painted.buffer.at(5).a, 1.0);
 
         Ok(())
     }
@@ -2159,7 +1987,7 @@ mod tests {
             Scale::default(),
             4.0,
             4.0,
-            Color::from_rgba_u8([200, 30, 60, 255]).srgb_to_linear(),
+            Color::from_rgba8([200, 30, 60, 255]).to_linear(),
         )?;
         let source = lua.create_userdata(Reference::new(source)).unwrap();
         let target = Image::new(Scale::default(), 4.0, 4.0, Color::TRANSPARENT)?;
@@ -2201,7 +2029,7 @@ mod tests {
         assert!(text.viewport.logical_width() > 0.0 && text.viewport.logical_height() > 0.0);
 
         let mut image = Image::new(Scale::default(), 200.0, 200.0, Color::TRANSPARENT)?;
-        let paint = Color::from_rgba_u8([200, 30, 60, 255]).srgb_to_linear();
+        let paint = Color::from_rgba8([200, 30, 60, 255]).to_linear();
         image.fill_text(&text, paint)?;
 
         let painted = image.to_rgba8();
@@ -2254,7 +2082,7 @@ mod tests {
     #[test]
     fn the_fill_text_is_a_no_op_for_degenerate_text() -> Result<()> {
         let mut image = Image::new(Scale::default(), 4.0, 4.0, Color::TRANSPARENT)?;
-        let paint = Color::from_rgba_u8([255, 255, 255, 255]).srgb_to_linear();
+        let paint = Color::from_rgba8([255, 255, 255, 255]).to_linear();
 
         let empty = Text::new(Scale::default(), "Noto Sans", 100.0, 400.0, 0.0, 0.0, "")?;
         image.fill_text(&empty, paint)?;
@@ -2283,7 +2111,7 @@ mod tests {
         assert!(text.viewport.logical_width() > 0.0 && text.viewport.logical_height() > 0.0);
 
         let mut image = Image::new(Scale::default(), 200.0, 200.0, Color::TRANSPARENT)?;
-        let paint = Color::from_rgba_u8([200, 30, 60, 255]).srgb_to_linear();
+        let paint = Color::from_rgba8([200, 30, 60, 255]).to_linear();
         image.fill_text(&text, paint)?;
 
         let painted = image.to_rgba8();
@@ -2346,7 +2174,7 @@ mod tests {
 
     #[test]
     fn the_divergent_branches_share_one_load() -> Result<()> {
-        let base_color = Color::from_rgba_u8([200, 30, 60, 255]).srgb_to_linear();
+        let base_color = Color::from_rgba8([200, 30, 60, 255]).to_linear();
         let source = Image::new(Scale::default(), 32.0, 32.0, base_color)?;
         let file = std::env::temp_dir().join(format!(
             "pikke-image-test-{}-shared-load.png",
@@ -2358,11 +2186,11 @@ mod tests {
         let mut right = reference.clone();
         left.fill(
             Rectangle::new(0.0, 0.0, 16.0, 32.0),
-            Color::from_rgba_u8([255, 255, 255, 255]).srgb_to_linear(),
+            Color::from_rgba8([255, 255, 255, 255]).to_linear(),
         );
         right.fill(
             Rectangle::new(16.0, 0.0, 16.0, 32.0),
-            Color::from_rgba_u8([0, 0, 0, 255]).srgb_to_linear(),
+            Color::from_rgba8([0, 0, 0, 255]).to_linear(),
         );
 
         source.write(&file)?;
@@ -2383,8 +2211,8 @@ mod tests {
 
     #[test]
     fn the_blend_uses_the_other_as_it_was_at_the_call() -> Result<()> {
-        let black = Color::from_rgba_u8([0, 0, 0, 255]).srgb_to_linear();
-        let white = Color::from_rgba_u8([255, 255, 255, 255]).srgb_to_linear();
+        let black = Color::from_rgba8([0, 0, 0, 255]).to_linear();
+        let white = Color::from_rgba8([255, 255, 255, 255]).to_linear();
 
         let mut base = Reference::blank(Scale::default(), 100.0, 100.0, black);
         let mut layer = Reference::blank(Scale::default(), 50.0, 50.0, white);
