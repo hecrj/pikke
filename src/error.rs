@@ -41,16 +41,21 @@ pub enum Error {
         script: PathBuf,
         error: Arc<io::Error>,
     },
+    #[error("script {script}: the module must be a table ({error})")]
+    ModuleNotTable {
+        script: PathBuf,
+        error: Arc<mlua::Error>,
+    },
     #[error("script {script}: 'render' is missing or not a function")]
     RenderMissing { script: PathBuf },
-    #[error("script {script}: 'ARGUMENTS' must be a table ({error})")]
+    #[error("script {script}: 'arguments' must be a table ({error})")]
     ArgumentsNotTable {
         script: PathBuf,
         error: Arc<mlua::Error>,
     },
     #[error("script {script}: '{name}' is a reserved argument name")]
     ArgumentReserved { script: PathBuf, name: String },
-    #[error("script {script}: 'ARGUMENTS' entry {index} must be a string ({error})")]
+    #[error("script {script}: 'arguments' entry {index} must be a string ({error})")]
     ArgumentNotString {
         script: PathBuf,
         index: usize,

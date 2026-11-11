@@ -163,10 +163,12 @@ record where they occur and folded back into DESIGN.md later:
   exactly once, at the linear → 8-bit encode (nearest 1/255 step,
   ties away from zero — Rust's `round`; out-of-range linear values
   clamp).
-- **Parameters and entry:** the script's globals expose the op table
-  and, when the entry takes parameters, an `ARGUMENTS` table
-  declaring them (in CLI order; absent — no parameters) — a table
-  read, so the engine needs no `debug` library. The engine loads the
+- **Parameters and entry:** the script's globals expose the op
+  table, and the script returns its module — a table with the
+  `render` entry function and, when it takes parameters, an
+  `arguments` array declaring them (in CLI order; absent — no
+  parameters) — a returned table, so the engine needs no `debug`
+  library. The engine loads the
   script (paths — `image`/`font`/`require` — resolve against the
   script's directory) with the op table installed before the chunk
   runs (the script's top level may call ops), creates a `--<name>`
@@ -329,8 +331,8 @@ into DESIGN.md later.
 
 **Phase 1 — the CLI, the VM, and the flags.** The `pikke` crate
 (mlua); the script runs in the state's globals, extended with the
-op table (§8); the entry's parameters are read from the script's
-`ARGUMENTS` declaration (§3b)
+op table (§8); the entry's parameters are read from the module's
+`arguments` declaration (§3b)
 and the hand-rolled CLI is built from them (the single-pass style —
 the dependencies, §6). The script is the first argument, so the
 flags exist before the pass (and the help text) happens; flag values
@@ -522,8 +524,8 @@ question for engine outputs.
   the script runs in the state's globals, extended with the op
   table — the full standard library is available to it (`os`, `io`,
   and `package` for `require`); the subset withholds only `debug`,
-  which introspection doesn't need (it's a table read of the
-  script's `ARGUMENTS` declaration, §3b).
+  which introspection doesn't need (it's a read of the module the
+  script returns, §3b).
 - **The resample happens once.** A layer is resampled to the run
   scale at the first op that needs it there (the `resize`, or the
   composite when the layer is still at its file scale), so no path

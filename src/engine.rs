@@ -49,13 +49,19 @@ impl Engine {
         package.set("path", path)?;
 
         let chunk = lua.load(source).set_name(script.display().to_string());
-        chunk.call::<()>(())?;
+        let module = chunk.call::<Table>(()).map_err(|error| match error {
+            mlua::Error::FromLuaConversionError { .. } => Error::ModuleNotTable {
+                script: script.clone(),
+                error: Arc::new(error),
+            },
+            error => error.into(),
+        })?;
 
-        let render: Function = env.get("render").map_err(|_| Error::RenderMissing {
+        let render: Function = module.get("render").map_err(|_| Error::RenderMissing {
             script: script.clone(),
         })?;
 
-        let arguments = arguments(&script, &env)?;
+        let arguments = arguments(&script, &module)?;
 
         Ok(Engine {
             script,
@@ -153,9 +159,10 @@ fn default_output(script: &Path) -> PathBuf {
         .unwrap_or(PathBuf::from("output.png"))
 }
 
-fn arguments(script: &Path, env: &Table) -> Result<Vec<String>> {
+fn arguments(script: &Path, module: &Table) -> Result<Vec<String>> {
     let arguments: Option<Table> =
-        env.get("ARGUMENTS")
+        module
+            .get("arguments")
             .map_err(|error| Error::ArgumentsNotTable {
                 script: script.to_path_buf(),
                 error: Arc::new(error),
@@ -212,8 +219,10 @@ mod tests {
         let (engine, _path) = load_script(
             "no-args",
             r#"
-function render(args)
-end
+return {
+  render = function(args)
+  end,
+}
 "#,
         );
         assert!(engine.arguments().is_empty());
@@ -224,9 +233,11 @@ end
         let (engine, _path) = load_script(
             "with-args",
             r#"
-ARGUMENTS = { "id", "title" }
-function render(args)
-end
+return {
+  arguments = { "id", "title" },
+  render = function(args)
+  end,
+}
 "#,
         );
         assert_eq!(engine.arguments(), &["id".to_string(), "title".to_string()]);
@@ -241,9 +252,11 @@ end
         std::fs::write(
             &path,
             r#"
-ARGUMENTS = "nope"
-function render(args)
-end
+return {
+  arguments = "nope",
+  render = function(args)
+  end,
+}
 "#,
         )
         .unwrap();
@@ -263,9 +276,11 @@ end
         std::fs::write(
             &path,
             r#"
-ARGUMENTS = { "output" }
-function render(args)
-end
+return {
+  arguments = { "output" },
+  render = function(args)
+  end,
+}
 "#,
         )
         .unwrap();
@@ -287,8 +302,10 @@ end
             &path,
             r#"
 required = (require "config").id
-function render(args)
-end
+return {
+  render = function(args)
+  end,
+}
 "#,
         )
         .unwrap();
@@ -302,10 +319,12 @@ end
         let (engine, path) = load_script(
             "yield-dims",
             r#"
-function render(args)
-  yield(blank({ width = 10, height = 10 }))
-  yield(blank({ width = 20, height = 10 }))
-end
+return {
+  render = function(args)
+    yield(blank({ width = 10, height = 10 }))
+    yield(blank({ width = 20, height = 10 }))
+  end,
+}
 "#,
         );
 
@@ -347,9 +366,11 @@ end
         let (engine, _path) = load_script(
             "still",
             r##"
-function render(args)
-  yield(blank({ width = 10, height = 10, color = "#FF0000" }))
-end
+return {
+  render = function(args)
+    yield(blank({ width = 10, height = 10, color = "#FF0000" }))
+  end,
+}
 "##,
         );
 
@@ -372,17 +393,19 @@ end
         let (engine, _path) = load_script(
             "clone-branch",
             r##"
-function render(args)
-  local base = blank({ width = 256, height = 256, color = "#808080" })
-  local branch = base:clone()
+return {
+  render = function(args)
+    local base = blank({ width = 256, height = 256, color = "#808080" })
+    local branch = base:clone()
 
-  base:resize({ width = 64 })
+    base:resize({ width = 64 })
 
-  assert(base.width == 64, "base: " .. base.width)
-  assert(branch.width == 256, "branch: " .. branch.width)
+    assert(base.width == 64, "base: " .. base.width)
+    assert(branch.width == 256, "branch: " .. branch.width)
 
-  yield(branch)
-end
+    yield(branch)
+  end,
+}
 "##,
         );
 
@@ -407,19 +430,21 @@ end
         let (engine, script_path) = load_script(
             "shared-load",
             r##"
-ARGUMENTS = { "data" }
-function render(args)
-  local base = image(args.data)
-  local left = base:clone()
-  local right = base:clone()
+return {
+  arguments = { "data" },
+  render = function(args)
+    local base = image(args.data)
+    local left = base:clone()
+    local right = base:clone()
 
-  left:fill(rectangle({ x = 0, y = 0, size = { 16, 32 } }), "#FFFFFF")
-  right:fill(rectangle({ x = 16, y = 0, size = { 16, 32 } }), "#000000")
+    left:fill(rectangle({ x = 0, y = 0, size = { 16, 32 } }), "#FFFFFF")
+    right:fill(rectangle({ x = 16, y = 0, size = { 16, 32 } }), "#000000")
 
-  yield(left)
-  os.remove(args.data)
-  yield(right)
-end
+    yield(left)
+    os.remove(args.data)
+    yield(right)
+  end,
+}
 "##,
         );
 
@@ -460,11 +485,13 @@ end
         let (engine, _path) = load_script(
             "video",
             r##"
-function render(args)
-  for i = 1, 3 do
-    yield(blank({ width = 16, height = 16, color = "#00FF00" }))
-  end
-end
+return {
+  render = function(args)
+    for i = 1, 3 do
+      yield(blank({ width = 16, height = 16, color = "#00FF00" }))
+    end
+  end,
+}
 "##,
         );
 
