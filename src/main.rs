@@ -22,6 +22,7 @@ pub use image::Image;
 pub use path::Path;
 pub use rectangle::Rectangle;
 pub use scale::Scale;
+pub use text::Text;
 pub use video::Video;
 pub use viewport::Viewport;
 

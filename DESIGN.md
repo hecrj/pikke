@@ -91,6 +91,7 @@ change is a script edit; an op-behavior change is an engine edit.
 |---|---|---|
 | `clone` | `img:clone() → Image` | A copy sharing `img`'s buffer (cheap); the copy diverges from `img` (copy-on-write) on its first in-place write. The branch point. |
 | `autocontrast` | `img:autocontrast()` | Histogram-stretch to full range, **tone-preserving** (no highlight/shadow clip). In place. |
+| `invert` | `img:invert()` | Invert every pixel's color: the unpremultiplied channels become `1 − c`, the alpha is unchanged. In place. |
 | `resize` | `img:resize({width, height, mode, filter})` | Scale to the target (logical px): exactly one of `width`/`height` — aspect preserved; both — the target box, `mode = "cover"` covers it and center-crops, no `mode` scales to it exactly; `filter = "lanczos"` or `"cubic"` (default). In place. |
 | `blend` | `img:blend(other, {at, color_space})` | Alpha-composite `other` over `img`, `other`'s top-left at `at` (a `Rectangle`, default `(0, 0)`), clipped to the receiver. `color_space`: `"linear"` (default) / `"srgb"`. In place. |
 | `fill` | `img:fill(region, color)` | Paint `region` (a `Rectangle`, `Text`, or `Path`) with `color` (hex). The space is chosen by the region's kind: a `Text` region composites in sRGB, a `Rectangle` or `Path` region in linear. In place. |
@@ -125,9 +126,10 @@ change is a script edit; an op-behavior change is an engine edit.
 ## Execution model
 
 - **In-place ops; one explicit copy.** The pixel ops (`autocontrast`,
-  `resize`, `blend`, `fill`) mutate the receiver in place and return
-  nothing. `clone()` is the model's only copy and the branch point:
-  fork the base, paint on it, `clone()` to start a fresh one.
+  `invert`, `resize`, `blend`, `fill`) mutate the receiver in place
+  and return nothing. `clone()` is the model's only copy and the
+  branch point: fork the base, paint on it, `clone()` to start a
+  fresh one.
 - **No hidden canvas.** The running composite is a value the script
   threads explicitly (`base` → `output`). There is no global state.
 - **Streaming.** `stream` is lazy. The `for` loop over it is the

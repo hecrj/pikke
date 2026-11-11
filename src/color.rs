@@ -87,6 +87,15 @@ impl Color {
             a: layer.a + self.a * retain,
         }
     }
+
+    pub const fn invert(self) -> Self {
+        Self {
+            r: invert(self.r),
+            g: invert(self.g),
+            b: invert(self.b),
+            a: self.a,
+        }
+    }
 }
 
 pub fn srgb_to_linear(stored: f32) -> f32 {
@@ -104,6 +113,10 @@ pub fn linear_to_srgb(linear: f32) -> f32 {
     } else {
         1.055 * linear.powf(1.0 / 2.4) - 0.055
     }
+}
+
+pub const fn invert(color: f32) -> f32 {
+    1.0 - color
 }
 
 pub const fn encode_u8(stored: f32) -> u8 {

@@ -12,9 +12,8 @@ use vello_cpu::{
     color::{AlphaColor, Srgb},
 };
 
-use crate::color::{Color, Filter, Space, crop, luma_linear, resize};
-use crate::text::Text;
-use crate::{Error, Path, Rectangle, Result, Scale, Viewport};
+use crate::color;
+use crate::{Color, Error, Path, Rectangle, Result, Scale, Text, Viewport};
 
 #[derive(Debug, Clone)]
 pub struct Image {
@@ -136,7 +135,7 @@ impl Image {
     pub fn resize(
         &mut self,
         dimension: Dimension,
-        filter: Filter,
+        filter: color::Filter,
         mode: Mode,
         scale: Option<Scale>,
     ) -> Result<()> {
@@ -180,19 +179,19 @@ impl Image {
         if resized {
             let (width, height) = (self.viewport.width(), self.viewport.height());
 
-            buffer.r = resize(filter, &buffer.r, width, height, box_w, box_h);
-            buffer.g = resize(filter, &buffer.g, width, height, box_w, box_h);
-            buffer.b = resize(filter, &buffer.b, width, height, box_w, box_h);
-            buffer.a = resize(filter, &buffer.a, width, height, box_w, box_h);
+            buffer.r = color::resize(filter, &buffer.r, width, height, box_w, box_h);
+            buffer.g = color::resize(filter, &buffer.g, width, height, box_w, box_h);
+            buffer.b = color::resize(filter, &buffer.b, width, height, box_w, box_h);
+            buffer.a = color::resize(filter, &buffer.a, width, height, box_w, box_h);
         }
 
         if left != 0 || top != 0 {
             let (target_w, target_h) = (new_viewport.width(), new_viewport.height());
 
-            buffer.r = crop(&buffer.r, box_w, left, top, target_w, target_h);
-            buffer.g = crop(&buffer.g, box_w, left, top, target_w, target_h);
-            buffer.b = crop(&buffer.b, box_w, left, top, target_w, target_h);
-            buffer.a = crop(&buffer.a, box_w, left, top, target_w, target_h);
+            buffer.r = color::crop(&buffer.r, box_w, left, top, target_w, target_h);
+            buffer.g = color::crop(&buffer.g, box_w, left, top, target_w, target_h);
+            buffer.b = color::crop(&buffer.b, box_w, left, top, target_w, target_h);
+            buffer.a = color::crop(&buffer.a, box_w, left, top, target_w, target_h);
         }
 
         if resized {
@@ -211,7 +210,7 @@ impl Image {
         let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
 
         for i in 0..count {
-            let luma = luma_linear(self.buffer.r[i], self.buffer.g[i], self.buffer.b[i]);
+            let luma = color::luma_linear(self.buffer.r[i], self.buffer.g[i], self.buffer.b[i]);
             lo = lo.min(luma);
             hi = hi.max(luma);
         }
@@ -238,7 +237,28 @@ impl Image {
         }
     }
 
-    pub fn blend(&mut self, other: &Image, at: Rectangle, space: Space) -> Result<()> {
+    pub fn invert(&mut self) {
+        let count = self.viewport.total_pixels();
+        let buffer = Arc::make_mut(&mut self.buffer);
+
+        for i in 0..count {
+            let Color { r, g, b, .. } = Color {
+                r: buffer.r[i],
+                g: buffer.g[i],
+                b: buffer.b[i],
+                a: buffer.a[i],
+            }
+            .demultiply()
+            .invert()
+            .premultiply();
+
+            buffer.r[i] = r;
+            buffer.g[i] = g;
+            buffer.b[i] = b;
+        }
+    }
+
+    pub fn blend(&mut self, other: &Image, at: Rectangle, space: color::Space) -> Result<()> {
         let scale = self.viewport.scale();
 
         let other = if other.viewport.scale() != scale {
@@ -249,7 +269,7 @@ impl Image {
                     width: other.logical_width(),
                     height: other.logical_height(),
                 },
-                Filter::default(),
+                color::Filter::default(),
                 Mode::Stretch,
                 Some(scale),
             )?;
@@ -300,8 +320,8 @@ impl Image {
                 };
 
                 let blended = match space {
-                    Space::Linear => base.over(layer),
-                    Space::Srgb => base
+                    color::Space::Linear => base.over(layer),
+                    color::Space::Srgb => base
                         .linear_to_srgb()
                         .over(layer.linear_to_srgb())
                         .srgb_to_linear(),
@@ -535,7 +555,7 @@ impl Image {
         for y in top..bottom {
             for x in left..right {
                 let i = (y * self.width() as i32 + x) as usize;
-                luma += luma_linear(r[i], g[i], b[i]);
+                luma += color::luma_linear(r[i], g[i], b[i]);
             }
         }
 
@@ -598,7 +618,13 @@ impl Reference {
         })))
     }
 
-    fn resize(&mut self, dimension: Dimension, filter: Filter, mode: Mode, scale: Option<Scale>) {
+    fn resize(
+        &mut self,
+        dimension: Dimension,
+        filter: color::Filter,
+        mode: Mode,
+        scale: Option<Scale>,
+    ) {
         self.replace(|source| Thunk::Resize {
             source,
             dimension,
@@ -612,7 +638,11 @@ impl Reference {
         self.replace(|source| Thunk::Autocontrast { source });
     }
 
-    fn blend(&mut self, other: &Reference, at: Rectangle, space: Space) {
+    fn invert(&mut self) {
+        self.replace(|source| Thunk::Invert { source });
+    }
+
+    fn blend(&mut self, other: &Reference, at: Rectangle, space: color::Space) {
         self.replace(|source| Thunk::Blend {
             source,
             other: other.clone(),
@@ -689,18 +719,21 @@ pub enum Thunk {
     Resize {
         source: Reference,
         dimension: Dimension,
-        filter: Filter,
+        filter: color::Filter,
         mode: Mode,
         scale: Option<Scale>,
     },
     Autocontrast {
         source: Reference,
     },
+    Invert {
+        source: Reference,
+    },
     Blend {
         source: Reference,
         other: Reference,
         at: Rectangle,
-        space: Space,
+        space: color::Space,
     },
     Fill {
         source: Reference,
@@ -738,6 +771,10 @@ impl Thunk {
             }),
             Thunk::Autocontrast { source } => source.evaluate(|source| {
                 source.autocontrast();
+                Ok(source.clone())
+            }),
+            Thunk::Invert { source } => source.evaluate(|source| {
+                source.invert();
                 Ok(source.clone())
             }),
             Thunk::Blend {
@@ -913,9 +950,9 @@ impl UserData for Reference {
             };
 
             let filter = match filter.as_deref() {
-                None => Filter::default(),
-                Some("cubic") => Filter::Cubic,
-                Some("lanczos") => Filter::Lanczos,
+                None => color::Filter::default(),
+                Some("cubic") => color::Filter::Cubic,
+                Some("lanczos") => color::Filter::Lanczos,
                 Some(other) => {
                     return Err(mlua::Error::RuntimeError(format!(
                         "resize: unknown filter: {other}"
@@ -943,6 +980,10 @@ impl UserData for Reference {
                 Ok(())
             },
         );
+        methods.add_method_mut("invert", |_lua, this, _args: ()| -> mlua::Result<()> {
+            this.invert();
+            Ok(())
+        });
         methods.add_method_mut(
             "blend",
             |lua, this, (other, opts): (AnyUserData, Option<Table>)| -> mlua::Result<()> {
@@ -959,8 +1000,8 @@ impl UserData for Reference {
                 };
                 let color_space: Option<String> = opts.get("color_space")?;
                 let space = match color_space.as_deref() {
-                    None | Some("linear") => Space::Linear,
-                    Some("srgb") => Space::Srgb,
+                    None | Some("linear") => color::Space::Linear,
+                    Some("srgb") => color::Space::Srgb,
                     Some(other) => {
                         return Err(mlua::Error::RuntimeError(format!(
                             "blend: unknown color_space: {other}"
@@ -1058,10 +1099,10 @@ mod tests {
 
     use mlua::{AnyUserData, Function, Lua, Table};
 
-    use super::{Buffer, Dimension, Filter, Image, Mode, Reference, install};
-    use crate::color::{Color, Space, luma_linear};
+    use super::{Buffer, Dimension, Image, Mode, Reference, install};
+    use crate::color;
     use crate::text::Text;
-    use crate::{Rectangle, Result, Scale, Viewport};
+    use crate::{Color, Rectangle, Result, Scale, Viewport};
 
     #[test]
     fn the_base_background_loads_at_its_file_dims() {
@@ -1195,7 +1236,7 @@ mod tests {
                 width: 200.0,
                 height: 250.0,
             },
-            Filter::Lanczos,
+            color::Filter::Lanczos,
             Mode::Stretch,
             Some(Scale::new(0.5)),
         )?;
@@ -1209,7 +1250,7 @@ mod tests {
                 width: 400.0,
                 height: 100.0,
             },
-            Filter::Cubic,
+            color::Filter::Cubic,
             Mode::Cover,
             Some(Scale::new(0.5)),
         )?;
@@ -1221,7 +1262,7 @@ mod tests {
                 width: 256.0,
                 height: 256.0,
             },
-            Filter::Cubic,
+            color::Filter::Cubic,
             Mode::Stretch,
             Some(Scale::new(2.0)),
         )?;
@@ -1247,7 +1288,7 @@ mod tests {
         .linear_to_srgb()
         .to_rgba_u8();
 
-        for filter in [Filter::Cubic, Filter::Lanczos] {
+        for filter in [color::Filter::Cubic, color::Filter::Lanczos] {
             for target in [4.0, 16.0] {
                 let mut image = square([0.5, 0.5, 0.5, 1.0], 8, Scale::default())?;
                 image.resize(
@@ -1275,7 +1316,7 @@ mod tests {
         let mut image = Image::new(Scale::default(), 64.0, 32.0, color)?;
         image.resize(
             Dimension::Width(128.0),
-            Filter::default(),
+            color::Filter::default(),
             Mode::default(),
             None,
         )?;
@@ -1287,7 +1328,7 @@ mod tests {
         let mut image = Image::new(Scale::default(), 64.0, 32.0, color)?;
         image.resize(
             Dimension::Height(16.0),
-            Filter::default(),
+            color::Filter::default(),
             Mode::default(),
             None,
         )?;
@@ -1369,7 +1410,7 @@ mod tests {
         let (r, g, b) = (&image.buffer.r, &image.buffer.g, &image.buffer.b);
         let sum: f32 = (20..70)
             .flat_map(|y| (10..110).map(move |x| y * 512 + x))
-            .map(|i| luma_linear(r[i], g[i], b[i]))
+            .map(|i| color::luma_linear(r[i], g[i], b[i]))
             .sum();
         let expected = sum / 5000.0 * 255.0;
         assert!((luma - expected).abs() < 1e-2);
@@ -1434,8 +1475,8 @@ mod tests {
         let mut image = synthetic_linear(&pixels, Scale::default())?;
         image.autocontrast();
 
-        let lo = luma_linear(0.3, 0.3, 0.3);
-        let hi = luma_linear(0.7, 0.7, 0.7);
+        let lo = color::luma_linear(0.3, 0.3, 0.3);
+        let hi = color::luma_linear(0.7, 0.7, 0.7);
         let scale = 1.0 / (hi - lo);
 
         for (i, pixel) in pixels.iter().enumerate() {
@@ -1493,7 +1534,7 @@ mod tests {
 
         let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
         for i in 0..count {
-            let luma = luma_linear(r[i], g[i], b[i]);
+            let luma = color::luma_linear(r[i], g[i], b[i]);
             lo = lo.min(luma);
             hi = hi.max(luma);
         }
@@ -1520,6 +1561,34 @@ mod tests {
     }
 
     #[test]
+    fn the_invert_inverts_the_straight_color() -> Result<()> {
+        let pixels = [
+            [1.0, 1.0, 1.0, 1.0],
+            [0.0, 0.0, 0.0, 1.0],
+            [0.1, 0.2, 0.3, 0.5],
+            [0.0, 0.0, 0.0, 0.0],
+        ];
+        let mut image = synthetic_linear(&pixels, Scale::default())?;
+        image.invert();
+
+        let expected = [
+            [0.0, 0.0, 0.0, 1.0],
+            [1.0, 1.0, 1.0, 1.0],
+            [0.4, 0.3, 0.2, 0.5],
+            [0.0, 0.0, 0.0, 0.0],
+        ];
+
+        for (i, expected) in expected.iter().enumerate() {
+            assert!((image.buffer.r[i] - expected[0]).abs() < 1e-6, "pixel {i}");
+            assert!((image.buffer.g[i] - expected[1]).abs() < 1e-6, "pixel {i}");
+            assert!((image.buffer.b[i] - expected[2]).abs() < 1e-6, "pixel {i}");
+            assert!((image.buffer.a[i] - expected[3]).abs() < 1e-6, "pixel {i}");
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn the_blend_is_byte_identical_where_the_layer_is_opaque() -> Result<()> {
         let lenna = Path::new(env!("CARGO_MANIFEST_DIR")).join("images/Lenna.png");
         let sky = Path::new(env!("CARGO_MANIFEST_DIR")).join("personal/images/sky-night.png");
@@ -1529,7 +1598,7 @@ mod tests {
         let (base_width, base_height) = (base.width() as usize, base.height() as usize);
         let (layer_width, layer_height) = (layer.width() as usize, layer.height() as usize);
 
-        base.blend(&layer, Rectangle::default(), Space::Linear)?;
+        base.blend(&layer, Rectangle::default(), color::Space::Linear)?;
 
         let after = base.to_rgba8();
         let layer = layer.to_rgba8();
@@ -1565,7 +1634,7 @@ mod tests {
             base.buffer.a.clone(),
         );
 
-        base.blend(&layer, Rectangle::default(), Space::Linear)?;
+        base.blend(&layer, Rectangle::default(), color::Space::Linear)?;
 
         let actual = base.to_rgba8();
         for y in 0..base_height {
@@ -1600,7 +1669,11 @@ mod tests {
         let white = square([1.0, 1.0, 1.0, 1.0], 2, Scale::default())?;
 
         let mut base = black.clone();
-        base.blend(&white, Rectangle::new(-1.0, -1.0, 0.0, 0.0), Space::Linear)?;
+        base.blend(
+            &white,
+            Rectangle::new(-1.0, -1.0, 0.0, 0.0),
+            color::Space::Linear,
+        )?;
         let rgba = base.to_rgba8();
         assert_eq!(&rgba[0..4], &[255, 255, 255, 255]);
         for i in 1..16 {
@@ -1608,7 +1681,11 @@ mod tests {
         }
 
         let mut base = black.clone();
-        base.blend(&white, Rectangle::new(3.0, 3.0, 0.0, 0.0), Space::Linear)?;
+        base.blend(
+            &white,
+            Rectangle::new(3.0, 3.0, 0.0, 0.0),
+            color::Space::Linear,
+        )?;
         let rgba = base.to_rgba8();
         for i in 0..15 {
             assert_eq!(&rgba[i * 4..i * 4 + 4], &[0, 0, 0, 255]);
@@ -1624,9 +1701,9 @@ mod tests {
         let layer = synthetic_linear(&[[0.5, 0.5, 0.5, 0.5]; 2], Scale::default())?;
 
         let mut linear = base.clone();
-        linear.blend(&layer, Rectangle::default(), Space::Linear)?;
+        linear.blend(&layer, Rectangle::default(), color::Space::Linear)?;
         let mut srgb = base.clone();
-        srgb.blend(&layer, Rectangle::default(), Space::Srgb)?;
+        srgb.blend(&layer, Rectangle::default(), color::Space::Srgb)?;
 
         for i in 0..2 {
             let linear_expected = Color {
@@ -1672,7 +1749,7 @@ mod tests {
         let mut base = Image::new(Scale::new(0.5), 512.0, 512.0, Color::TRANSPARENT)?;
         let layer = Image::load(&lenna, Scale::new(0.5)).unwrap();
 
-        base.blend(&layer, Rectangle::default(), Space::Linear)?;
+        base.blend(&layer, Rectangle::default(), color::Space::Linear)?;
 
         let mut expected = layer.clone();
         expected.resize(
@@ -1680,7 +1757,7 @@ mod tests {
                 width: 512.0,
                 height: 512.0,
             },
-            Filter::default(),
+            color::Filter::default(),
             Mode::Stretch,
             Some(Scale::new(0.5)),
         )?;
@@ -2041,7 +2118,7 @@ mod tests {
                 width: 128.0,
                 height: 128.0,
             },
-            Filter::Cubic,
+            color::Filter::Cubic,
             Mode::Stretch,
             None,
         );
@@ -2098,13 +2175,17 @@ mod tests {
         let mut base = Reference::blank(Scale::default(), 100.0, 100.0, black);
         let mut layer = Reference::blank(Scale::default(), 50.0, 50.0, white);
 
-        base.blend(&layer, Rectangle::new(0.0, 0.0, 50.0, 50.0), Space::Linear);
+        base.blend(
+            &layer,
+            Rectangle::new(0.0, 0.0, 50.0, 50.0),
+            color::Space::Linear,
+        );
         layer.resize(
             Dimension::Both {
                 width: 25.0,
                 height: 25.0,
             },
-            Filter::Cubic,
+            color::Filter::Cubic,
             Mode::Stretch,
             None,
         );
