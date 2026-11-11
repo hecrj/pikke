@@ -1,4 +1,4 @@
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use mlua::{Lua, Table, UserData, UserDataFields, UserDataMethods, Value};
 use parlance::NormalizedCoord as ParlayCoord;
@@ -21,7 +21,7 @@ pub struct Text {
     pub y: f32,
     pub viewport: Viewport,
     pub ink_min: (f32, f32),
-    layout: Layout<()>,
+    layout: Arc<Layout<()>>,
 }
 
 pub struct Glyph<'a> {
@@ -48,7 +48,7 @@ impl Text {
             y,
             viewport: Viewport::zero(scale),
             ink_min: (0.0, 0.0),
-            layout,
+            layout: Arc::new(layout),
         };
 
         if string.is_empty() {
@@ -80,7 +80,7 @@ impl Text {
             y,
             viewport: Viewport::from_logical(width, height, scale)?,
             ink_min: (min_x / scale, min_y / scale),
-            layout,
+            layout: Arc::new(layout),
         })
     }
 
@@ -343,9 +343,9 @@ pub fn install(lua: &Lua, env: &Table, scale: Scale) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+    use std::sync::Arc;
 
     use mlua::{AnyUserData, Function, Lua, Table};
-    use parley::Layout;
 
     use super::{Text, install};
     use crate::font::{Font, install as font_install};
@@ -454,7 +454,7 @@ mod tests {
             y: 40.0,
             viewport: Viewport::from_logical(200.0, 100.0, Scale::new(0.5)).unwrap(),
             ink_min: (0.0, 0.0),
-            layout: Layout::new(),
+            layout: Arc::default(),
         };
         let env = lua.create_table().unwrap();
         env.set("text", lua.create_userdata(text).unwrap()).unwrap();
@@ -521,7 +521,7 @@ mod tests {
             y,
             viewport: Viewport::from_physical_u32(100, 50, Scale::new(scale)).unwrap(),
             ink_min: (0.0, 0.0),
-            layout: Layout::new(),
+            layout: Arc::default(),
         };
         let value = lua.create_userdata(text).unwrap();
         let env = lua.create_table().unwrap();

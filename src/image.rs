@@ -1,6 +1,6 @@
 use std::io;
-use std::path;
-use std::sync::Arc;
+use std::path::{self, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use image::{ColorType, ImageFormat};
 use mlua::{AnyUserData, Lua, Table, UserData, UserDataFields, UserDataMethods};
@@ -74,6 +74,19 @@ impl Image {
             buffer: Arc::new(Buffer { r, g, b, a }),
             viewport,
             target_scale: viewport.scale(),
+        })
+    }
+
+    fn load(path: impl AsRef<path::Path>, target_scale: Scale) -> Result<Self> {
+        let rgba = image::open(path)?.to_rgba8();
+
+        let (width, height) = (rgba.width(), rgba.height());
+        let (r, g, b, a) = decode_rgba8(&rgba);
+
+        Ok(Self {
+            buffer: Arc::new(Buffer { r, g, b, a }),
+            viewport: Viewport::from_physical_u32(width, height, Scale::default())?,
+            target_scale,
         })
     }
 
@@ -285,7 +298,7 @@ impl Image {
         Ok(())
     }
 
-    pub fn fill<'a>(&mut self, fill: impl Into<Geometry<'a>>, paint: Color) {
+    pub fn fill(&mut self, fill: impl Into<Geometry>, paint: Color) {
         let mut resources = Resources::new();
         let mut context = RenderContext::new(self.width(), self.height());
         context.set_paint(AlphaColor::<Srgb>::BLACK);
@@ -539,34 +552,232 @@ impl Image {
 }
 
 #[derive(Debug, Clone)]
-pub enum Geometry<'a> {
-    Rectangle(Rectangle),
-    Path(&'a Path),
+pub struct Reference(Arc<Mutex<Thunk>>);
+
+impl Reference {
+    pub fn new(image: Image) -> Self {
+        Self(Arc::new(Mutex::new(Thunk::Image(image))))
+    }
+
+    pub fn image(&self) -> Result<Image> {
+        self.evaluate(|image| Ok(image.clone()))
+    }
+
+    fn blank(scale: Scale, width: f32, height: f32, color: Color) -> Self {
+        Self(Arc::new(Mutex::new(Thunk::Blank {
+            scale,
+            width,
+            height,
+            color,
+        })))
+    }
+
+    fn load(path: impl AsRef<path::Path>, scale: Scale) -> Self {
+        Self(Arc::new(Mutex::new(Thunk::File {
+            path: path.as_ref().to_path_buf(),
+            scale,
+        })))
+    }
+
+    fn resize(
+        &mut self,
+        new_width: f32,
+        new_height: f32,
+        filter: Filter,
+        mode: Mode,
+        scale: Option<Scale>,
+    ) {
+        self.replace(|source| Thunk::Resize {
+            source,
+            new_width,
+            new_height,
+            filter,
+            mode,
+            scale,
+        });
+    }
+
+    fn autocontrast(&mut self) {
+        self.replace(|source| Thunk::Autocontrast { source });
+    }
+
+    fn blend(&mut self, other: &Reference, at: Rectangle, space: Space) {
+        self.replace(|source| Thunk::Blend {
+            source,
+            other: other.clone(),
+            at,
+            space,
+        });
+    }
+
+    fn fill(&mut self, geometry: impl Into<Geometry>, paint: Color) {
+        self.replace(|source| Thunk::Fill {
+            source,
+            geometry: geometry.into(),
+            paint,
+        });
+    }
+
+    fn fill_text(&mut self, text: &Text, paint: Color) {
+        self.replace(|source| Thunk::FillText {
+            source,
+            text: text.clone(),
+            paint,
+        });
+    }
+
+    fn logical_width(&self) -> Result<f32> {
+        self.evaluate(|image| Ok(image.logical_width()))
+    }
+
+    fn logical_height(&self) -> Result<f32> {
+        self.evaluate(|image| Ok(image.logical_height()))
+    }
+
+    fn luma_in(&self, region: Rectangle) -> Result<f32> {
+        self.evaluate(|image| image.luma_in(region))
+    }
+
+    fn evaluate<T>(&self, f: impl FnOnce(&mut Image) -> Result<T>) -> Result<T> {
+        let mut thunk = self.0.lock().expect("lock image reference");
+
+        if !matches!(*thunk, Thunk::Image(_)) {
+            *thunk = Thunk::Image(thunk.evaluate()?);
+        };
+
+        let Thunk::Image(image) = &mut *thunk else {
+            unreachable!();
+        };
+
+        f(image)
+    }
+
+    fn replace(&mut self, thunk: impl FnOnce(Self) -> Thunk) {
+        self.0 = Arc::new(Mutex::new(if Arc::strong_count(&self.0) == 1 {
+            thunk(self.clone())
+        } else {
+            thunk(Self(Arc::new(Mutex::new(Thunk::Snapshot(self.clone())))))
+        }));
+    }
 }
 
-impl From<Rectangle> for Geometry<'_> {
+#[derive(Debug, Clone)]
+pub enum Thunk {
+    Blank {
+        scale: Scale,
+        width: f32,
+        height: f32,
+        color: Color,
+    },
+    File {
+        path: PathBuf,
+        scale: Scale,
+    },
+    Image(Image),
+    Snapshot(Reference),
+    Resize {
+        source: Reference,
+        new_width: f32,
+        new_height: f32,
+        filter: Filter,
+        mode: Mode,
+        scale: Option<Scale>,
+    },
+    Autocontrast {
+        source: Reference,
+    },
+    Blend {
+        source: Reference,
+        other: Reference,
+        at: Rectangle,
+        space: Space,
+    },
+    Fill {
+        source: Reference,
+        geometry: Geometry,
+        paint: Color,
+    },
+    FillText {
+        source: Reference,
+        text: Text,
+        paint: Color,
+    },
+}
+
+impl Thunk {
+    fn evaluate(&self) -> Result<Image> {
+        match self {
+            Thunk::Blank {
+                scale,
+                width,
+                height,
+                color,
+            } => Image::new(*scale, *width, *height, *color),
+            Thunk::File { path, scale } => Image::load(path, *scale),
+            Thunk::Image(image) => Ok(image.clone()),
+            Thunk::Snapshot(reference) => reference.evaluate(|image| Ok(image.clone())),
+            Thunk::Resize {
+                source,
+                new_width,
+                new_height,
+                filter,
+                mode,
+                scale,
+            } => source.evaluate(|source| {
+                source.resize(*new_width, *new_height, *filter, *mode, *scale)?;
+                Ok(source.clone())
+            }),
+            Thunk::Autocontrast { source } => source.evaluate(|source| {
+                source.autocontrast();
+                Ok(source.clone())
+            }),
+            Thunk::Blend {
+                source,
+                other,
+                at,
+                space,
+            } => source.evaluate(|source| {
+                other.evaluate(|other| {
+                    source.blend(other, *at, *space)?;
+                    Ok(source.clone())
+                })
+            }),
+            Thunk::Fill {
+                source,
+                geometry,
+                paint,
+            } => source.evaluate(|source| {
+                source.fill(geometry.clone(), *paint);
+                Ok(source.clone())
+            }),
+            Thunk::FillText {
+                source,
+                text,
+                paint,
+            } => source.evaluate(|source| {
+                source.fill_text(text, *paint)?;
+                Ok(source.clone())
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum Geometry {
+    Rectangle(Rectangle),
+    Path(Path),
+}
+
+impl From<Rectangle> for Geometry {
     fn from(rectangle: Rectangle) -> Self {
         Self::Rectangle(rectangle)
     }
 }
 
-impl<'a> From<&'a Path> for Geometry<'a> {
-    fn from(path: &'a Path) -> Self {
+impl From<Path> for Geometry {
+    fn from(path: Path) -> Self {
         Self::Path(path)
     }
-}
-
-fn load(path: &path::Path, target_scale: Scale) -> Result<Image> {
-    let rgba = image::open(path)?.to_rgba8();
-
-    let (width, height) = (rgba.width(), rgba.height());
-    let (r, g, b, a) = decode_rgba8(&rgba);
-
-    Ok(Image {
-        buffer: Arc::new(Buffer { r, g, b, a }),
-        viewport: Viewport::from_physical_u32(width, height, Scale::default())?,
-        target_scale,
-    })
 }
 
 fn decode_rgba8(rgba: &[u8]) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
@@ -653,27 +864,28 @@ fn paint_from_hex(operation: &str, color: &str) -> mlua::Result<Color> {
     Ok(Color::from_rgba_u8([channel(0)?, channel(2)?, channel(4)?, 255]).srgb_to_linear())
 }
 
-impl UserData for Image {
-    fn add_fields<F: UserDataFields<Image>>(fields: &mut F) {
+impl UserData for Reference {
+    fn add_fields<F: UserDataFields<Reference>>(fields: &mut F) {
         fields.add_meta_field("__name", "Image");
         fields.add_field_method_get("width", |_lua, this| -> mlua::Result<f32> {
-            Ok(this.logical_width())
+            Ok(this.logical_width()?)
         });
         fields.add_field_method_get("height", |_lua, this| -> mlua::Result<f32> {
-            Ok(this.logical_height())
+            Ok(this.logical_height()?)
         });
         fields.add_field_method_get("size", |lua, this| -> mlua::Result<Table> {
             let size = lua.create_table()?;
-            size.set(1, this.logical_width())?;
-            size.set(2, this.logical_height())?;
+            size.set(1, this.logical_width()?)?;
+            size.set(2, this.logical_height()?)?;
             Ok(size)
         });
     }
 
-    fn add_methods<M: UserDataMethods<Image>>(methods: &mut M) {
-        methods.add_method("clone", |_lua, this, _args: ()| -> mlua::Result<Image> {
-            Ok(this.clone())
-        });
+    fn add_methods<M: UserDataMethods<Reference>>(methods: &mut M) {
+        methods.add_method(
+            "clone",
+            |_lua, this, _args: ()| -> mlua::Result<Reference> { Ok(this.clone()) },
+        );
         methods.add_method_mut("resize", |_lua, this, opts: Table| -> mlua::Result<()> {
             let width: Option<f32> = opts.get("width")?;
             let height: Option<f32> = opts.get("height")?;
@@ -682,11 +894,12 @@ impl UserData for Image {
 
             let (width, height) = match (width, height) {
                 (Some(width), Some(height)) => (width, height),
-                (Some(width), None) => {
-                    (width, width * this.logical_height() / this.logical_width())
-                }
+                (Some(width), None) => (
+                    width,
+                    width * this.logical_height()? / this.logical_width()?,
+                ),
                 (None, Some(height)) => (
-                    height * this.logical_width() / this.logical_height(),
+                    height * this.logical_width()? / this.logical_height()?,
                     height,
                 ),
                 (None, None) => {
@@ -717,7 +930,7 @@ impl UserData for Image {
                 }
             };
 
-            this.resize(width, height, filter, mode, None)?;
+            this.resize(width, height, filter, mode, None);
             Ok(())
         });
         methods.add_method_mut(
@@ -735,7 +948,7 @@ impl UserData for Image {
                     None => lua.create_table()?,
                 };
 
-                let other = other.borrow::<Image>()?;
+                let other = other.borrow::<Reference>()?;
                 let at: Option<AnyUserData> = opts.get("at")?;
                 let at = match at {
                     Some(at) => *at.borrow::<Rectangle>()?,
@@ -752,7 +965,7 @@ impl UserData for Image {
                     }
                 };
 
-                this.blend(&other, at, space)?;
+                this.blend(&other, at, space);
                 Ok(())
             },
         );
@@ -767,7 +980,7 @@ impl UserData for Image {
                 }
 
                 if let Ok(text) = region.borrow::<Text>() {
-                    this.fill_text(&text, paint)?;
+                    this.fill_text(&text, paint);
                     return Ok(());
                 }
 
@@ -776,7 +989,7 @@ impl UserData for Image {
                         "fill: the region must be a `Rectangle`, a `Text`, or a `Path`".to_owned(),
                     )
                 })?;
-                this.fill(Geometry::Path(&path), paint);
+                this.fill(path.clone(), paint);
                 Ok(())
             },
         );
@@ -795,14 +1008,13 @@ pub fn install(lua: &Lua, env: &Table, script_dir: &path::Path, scale: Scale) ->
 
     env.set(
         "image",
-        lua.create_function(move |_lua, path: String| -> mlua::Result<Image> {
-            load(&script_dir.join(&path), scale)
-                .map_err(|error| mlua::Error::RuntimeError(error.to_string()))
+        lua.create_function(move |_lua, path: String| -> mlua::Result<Reference> {
+            Ok(Reference::load(script_dir.join(&path), scale))
         })?,
     )?;
     env.set(
         "blank",
-        lua.create_function(move |_lua, opts: Table| -> mlua::Result<Image> {
+        lua.create_function(move |_lua, opts: Table| -> mlua::Result<Reference> {
             let width: Option<f32> = opts.get("width")?;
             let height: Option<f32> = opts.get("height")?;
             let color: Option<String> = opts.get("color")?;
@@ -830,8 +1042,7 @@ pub fn install(lua: &Lua, env: &Table, script_dir: &path::Path, scale: Scale) ->
                 Color::TRANSPARENT
             };
 
-            Image::new(scale, width, height, paint)
-                .map_err(|error| mlua::Error::RuntimeError(error.to_string()))
+            Ok(Reference::blank(scale, width, height, paint))
         })?,
     )?;
     Ok(())
@@ -844,7 +1055,7 @@ mod tests {
 
     use mlua::{AnyUserData, Function, Lua, Table};
 
-    use super::{Buffer, Filter, Image, Mode, install, load};
+    use super::{Buffer, Filter, Image, Mode, Reference, install};
     use crate::color::{Color, Space, luma_linear};
     use crate::text::Text;
     use crate::{Rectangle, Result, Scale, Viewport};
@@ -857,7 +1068,7 @@ mod tests {
         let file_width = u32::from_be_bytes([file[16], file[17], file[18], file[19]]);
         let file_height = u32::from_be_bytes([file[20], file[21], file[22], file[23]]);
 
-        let image = load(&path, Scale::default()).unwrap();
+        let image = Image::load(&path, Scale::default()).unwrap();
         assert_eq!(
             (image.logical_width(), image.logical_height()),
             (file_width as f32, file_height as f32)
@@ -921,7 +1132,7 @@ mod tests {
         opts.set("height", 2).unwrap();
         opts.set("color", "#C81E3C").unwrap();
         let userdata: AnyUserData = blank.call(opts).unwrap();
-        let image = userdata.borrow::<Image>().unwrap().clone();
+        let image = userdata.borrow::<Reference>().unwrap().image().unwrap();
         assert_eq!((image.width(), image.height()), (4, 2));
         for pixel in image.to_rgba8().chunks(4) {
             assert_eq!(pixel, &[200, 30, 60, 255]);
@@ -931,7 +1142,7 @@ mod tests {
         opts.set("width", 4).unwrap();
         opts.set("height", 2).unwrap();
         let userdata: AnyUserData = blank.call(opts).unwrap();
-        let image = userdata.borrow::<Image>().unwrap().clone();
+        let image = userdata.borrow::<Reference>().unwrap().image().unwrap();
         assert_eq!((image.width(), image.height()), (4, 2));
         assert!(image.to_rgba8().iter().all(|&byte| byte == 0));
 
@@ -971,7 +1182,7 @@ mod tests {
     #[test]
     fn resize_lands_on_its_targets_and_forks() -> Result<()> {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("images/Lenna.png");
-        let mut image = load(&path, Scale::new(0.5)).unwrap();
+        let mut image = Image::load(&path, Scale::new(0.5)).unwrap();
         let first_pixel = image.buffer.r[0];
 
         let mut fork = image.clone();
@@ -997,7 +1208,7 @@ mod tests {
         )?;
         assert_eq!((fork.width(), fork.height()), (200, 50));
 
-        let mut image = load(&path, Scale::new(2.0)).unwrap();
+        let mut image = Image::load(&path, Scale::new(2.0)).unwrap();
         image.resize(
             256.0,
             256.0,
@@ -1103,7 +1314,7 @@ mod tests {
     #[test]
     fn the_luma_in_matches_the_709_mean_on_a_real_image() -> Result<()> {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("images/Lenna.png");
-        let image = load(&path, Scale::default()).unwrap();
+        let image = Image::load(&path, Scale::default()).unwrap();
 
         let luma = image.luma_in(Rectangle::new(10.0, 20.0, 100.0, 50.0))?;
 
@@ -1121,7 +1332,7 @@ mod tests {
     #[test]
     fn the_luma_in_matches_the_independent_709_mean() -> Result<()> {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("personal/images/sky-night.png");
-        let image = load(&path, Scale::default()).unwrap();
+        let image = Image::load(&path, Scale::default()).unwrap();
 
         // Frozen oracles: an independent Python pass (PIL, the IEC 61966-2-1
         // decode, the Rec. 709 mean) over personal/images/sky-night.png.
@@ -1223,7 +1434,7 @@ mod tests {
     #[test]
     fn the_sky_background_autocontrast_applies_the_ramp() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("personal/images/sky-night.png");
-        let mut image = load(&path, Scale::default()).unwrap();
+        let mut image = Image::load(&path, Scale::default()).unwrap();
 
         let count = image.viewport.total_pixels();
         let (r, g, b) = (
@@ -1264,9 +1475,9 @@ mod tests {
     fn the_blend_is_byte_identical_where_the_layer_is_opaque() -> Result<()> {
         let lenna = Path::new(env!("CARGO_MANIFEST_DIR")).join("images/Lenna.png");
         let sky = Path::new(env!("CARGO_MANIFEST_DIR")).join("personal/images/sky-night.png");
-        let mut base = load(&sky, Scale::default()).unwrap();
+        let mut base = Image::load(&sky, Scale::default()).unwrap();
         let before = base.to_rgba8();
-        let layer = load(&lenna, Scale::default()).unwrap();
+        let layer = Image::load(&lenna, Scale::default()).unwrap();
         let (base_width, base_height) = (base.width() as usize, base.height() as usize);
         let (layer_width, layer_height) = (layer.width() as usize, layer.height() as usize);
 
@@ -1294,8 +1505,8 @@ mod tests {
         let lenna = Path::new(env!("CARGO_MANIFEST_DIR")).join("images/Lenna.png");
         let mask =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("personal/images/Card_Mask_Standard.png");
-        let mut base = load(&lenna, Scale::default()).unwrap();
-        let layer = load(&mask, Scale::default()).unwrap();
+        let mut base = Image::load(&lenna, Scale::default()).unwrap();
+        let layer = Image::load(&mask, Scale::default()).unwrap();
         let (base_width, base_height) = (base.width() as usize, base.height() as usize);
         let layer_width = layer.width() as usize;
 
@@ -1411,7 +1622,7 @@ mod tests {
     fn the_blend_resamples_the_file_scale_layer() -> Result<()> {
         let lenna = Path::new(env!("CARGO_MANIFEST_DIR")).join("images/Lenna.png");
         let mut base = Image::new(Scale::new(0.5), 512.0, 512.0, Color::TRANSPARENT)?;
-        let layer = load(&lenna, Scale::new(0.5)).unwrap();
+        let layer = Image::load(&lenna, Scale::new(0.5)).unwrap();
 
         base.blend(&layer, Rectangle::default(), Space::Linear)?;
 
@@ -1536,7 +1747,7 @@ mod tests {
         path.line_to(6.0, 6.0);
         path.line_to(2.0, 6.0);
         path.close();
-        image.fill(&path, paint);
+        image.fill(path, paint);
 
         let painted = image.to_rgba8();
         let pixel = |x: usize, y: usize| {
@@ -1557,13 +1768,13 @@ mod tests {
         let mut image = Image::new(Scale::default(), 4.0, 4.0, Color::TRANSPARENT)?;
         let paint = Color::from_rgba_u8([255, 255, 255, 255]).srgb_to_linear();
 
-        image.fill(&crate::path::Path::new(), paint);
+        image.fill(crate::path::Path::new(), paint);
 
         let mut non_finite = crate::path::Path::new();
         non_finite.move_to(f32::INFINITY, 0.0);
         non_finite.line_to(0.0, f32::NAN);
         non_finite.close();
-        image.fill(&non_finite, paint);
+        image.fill(non_finite, paint);
 
         let painted = image.to_rgba8();
         assert!(painted.iter().all(|&byte| byte == 0));
@@ -1575,7 +1786,7 @@ mod tests {
     fn the_fill_binding_validates_its_arguments() -> Result<()> {
         let lua = Lua::new();
         let image = Image::new(Scale::default(), 4.0, 4.0, Color::TRANSPARENT)?;
-        let output = lua.create_userdata(image).unwrap();
+        let output = lua.create_userdata(Reference::new(image)).unwrap();
         let region = lua
             .create_userdata(Rectangle::new(0.0, 0.0, 2.0, 2.0))
             .unwrap();
@@ -1625,7 +1836,7 @@ mod tests {
             .set_environment(env)
             .eval::<()>()
             .unwrap();
-        let painted = output.borrow::<Image>().unwrap().clone();
+        let painted = output.borrow::<Reference>().unwrap().image().unwrap();
         assert!(painted.buffer.r[5] > 0.0);
         assert_eq!(painted.buffer.a[5], 1.0);
 
@@ -1761,6 +1972,46 @@ mod tests {
         assert_eq!(&painted[pixel..pixel + 4], &[200, 30, 60, 255]);
         assert!(solid > 20);
 
+        Ok(())
+    }
+
+    #[test]
+    fn the_clone_diverges_on_the_first_in_place_write() -> Result<()> {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("images/Lenna.png");
+        let file = Image::load(&path, Scale::default())?;
+        let file_pixels = file.to_rgba8();
+
+        let mut reference = Reference::load(&path, Scale::default());
+        let branch = reference.clone();
+
+        assert_eq!(branch.logical_width()?, 512.0);
+
+        reference.resize(128.0, 128.0, Filter::Cubic, Mode::Stretch, None);
+
+        assert_eq!(reference.logical_width()?, 128.0);
+        assert_eq!(branch.logical_width()?, 512.0);
+        assert_eq!(branch.image()?.to_rgba8(), file_pixels);
+
+        Ok(())
+    }
+
+    #[test]
+    fn the_blend_uses_the_other_as_it_was_at_the_call() -> Result<()> {
+        let black = Color::from_rgba_u8([0, 0, 0, 255]).srgb_to_linear();
+        let white = Color::from_rgba_u8([255, 255, 255, 255]).srgb_to_linear();
+
+        let mut base = Reference::blank(Scale::default(), 100.0, 100.0, black);
+        let mut layer = Reference::blank(Scale::default(), 50.0, 50.0, white);
+
+        base.blend(&layer, Rectangle::new(0.0, 0.0, 50.0, 50.0), Space::Linear);
+        layer.resize(25.0, 25.0, Filter::Cubic, Mode::Stretch, None);
+
+        assert_eq!(layer.logical_width()?, 25.0);
+
+        let image = base.image()?;
+        let luma = image.luma_in(Rectangle::new(0.0, 0.0, 50.0, 50.0))?;
+
+        assert!(luma > 200.0);
         Ok(())
     }
 }

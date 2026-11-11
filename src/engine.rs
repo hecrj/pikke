@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use mlua::{AnyUserData, Function, Lua, Table};
 
-use crate::{Error, Image, Result, Scale, Video, font, image, path, rectangle, stream, text};
+use crate::{Error, Result, Scale, Video, font, image, path, rectangle, stream, text};
 
 pub struct Engine {
     script: PathBuf,
@@ -93,7 +93,7 @@ impl Engine {
                 .create_function_mut(move |lua, frame: AnyUserData| -> mlua::Result<()> {
                     frame_number += 1;
 
-                    let frame = frame.borrow::<Image>()?;
+                    let frame = frame.borrow::<image::Reference>()?.image()?;
                     let width = frame.width();
                     let height = frame.height();
 
@@ -106,23 +106,14 @@ impl Engine {
                         )));
                     }
 
-                    eprintln!(
-                        "yield: frame {frame_number} ({}×{})",
-                        frame.width(),
-                        frame.height()
-                    );
+                    eprintln!("yield: frame {frame_number} ({width}×{height})",);
 
                     if frame_number == 1 {
-                        dimensions = Some((frame.width(), frame.height()));
+                        dimensions = Some((width, height));
 
                         frame.write(&output)?;
 
-                        eprintln!(
-                            "output: {} ({}×{})",
-                            output.display(),
-                            frame.width(),
-                            frame.height()
-                        );
+                        eprintln!("output: {} ({width}×{height})", output.display(),);
                     }
 
                     lua.app_data_mut::<Video>()
@@ -374,6 +365,41 @@ end
         let rgba: Vec<u8> = image::open(&output).unwrap().to_rgba8().into_raw();
         assert_eq!(rgba, [255, 0, 0, 255].repeat(100));
         assert!(!dir.join("still.mp4").exists());
+    }
+
+    #[test]
+    fn the_run_respects_the_clone_branch_point() {
+        let (engine, _path) = load_script(
+            "clone-branch",
+            r##"
+function render(args)
+  local base = blank({ width = 256, height = 256, color = "#808080" })
+  local branch = base:clone()
+
+  base:resize({ width = 64 })
+
+  assert(base.width == 64, "base: " .. base.width)
+  assert(branch.width == 256, "branch: " .. branch.width)
+
+  yield(branch)
+end
+"##,
+        );
+
+        let dir = std::env::temp_dir().join(format!(
+            "pikke-engine-test-{}-clone-branch",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let output = dir.join("branch.png");
+
+        let params: &[(String, Option<String>)] = &[];
+
+        engine.run(params, Some(&output)).unwrap();
+
+        let rgba: Vec<u8> = image::open(&output).unwrap().to_rgba8().into_raw();
+        assert_eq!(rgba, [128, 128, 128, 255].repeat(256 * 256));
+        assert!(!dir.join("branch.mp4").exists());
     }
 
     #[test]

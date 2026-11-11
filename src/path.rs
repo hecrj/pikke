@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use mlua::{Lua, Result, Table, UserData, UserDataFields, UserDataMethods, Value};
 use vello_cpu::kurbo::{Affine, BezPath, PathEl};
 
@@ -5,37 +7,40 @@ use crate::Scale;
 
 #[derive(Clone, Debug, Default)]
 pub struct Path {
-    raw: BezPath,
+    raw: Arc<BezPath>,
 }
 
 impl Path {
     pub fn new() -> Path {
         Path {
-            raw: BezPath::new(),
+            raw: Arc::new(BezPath::new()),
         }
     }
 
     pub fn move_to(&mut self, x: f32, y: f32) {
-        self.raw.move_to((x as f64, y as f64));
+        let raw = Arc::make_mut(&mut self.raw);
+        raw.move_to((x as f64, y as f64));
     }
 
     pub fn line_to(&mut self, x: f32, y: f32) {
-        self.raw.line_to((x as f64, y as f64));
+        let raw = Arc::make_mut(&mut self.raw);
+        raw.line_to((x as f64, y as f64));
     }
 
     pub fn close(&mut self) {
-        self.raw.close_path();
+        let raw = Arc::make_mut(&mut self.raw);
+        raw.close_path();
     }
 
     pub fn translate(&mut self, x: f32, y: f32) {
-        self.raw
-            .apply_affine(Affine::translate((x as f64, y as f64)));
+        let raw = Arc::make_mut(&mut self.raw);
+        raw.apply_affine(Affine::translate((x as f64, y as f64)));
     }
 
     pub fn snap(&self, scale: Scale) -> Self {
-        let mut path = self.clone();
+        let mut path = BezPath::clone(&self.raw);
 
-        for element in path.raw.elements_mut() {
+        for element in path.elements_mut() {
             match element {
                 PathEl::MoveTo(point) | PathEl::LineTo(point) => {
                     *point = (*point * scale).round();
@@ -53,7 +58,9 @@ impl Path {
             }
         }
 
-        path
+        Self {
+            raw: Arc::new(path),
+        }
     }
 }
 

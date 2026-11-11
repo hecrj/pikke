@@ -5,6 +5,7 @@ use std::thread::{self, JoinHandle};
 
 use mlua::{Lua, MetaMethod, ObjectLike, Table, UserData, UserDataFields, UserDataMethods, Value};
 
+use crate::image;
 use crate::{Image, Result, Scale, Viewport};
 
 const STDERR_TAIL: usize = 1 << 20;
@@ -135,7 +136,7 @@ impl UserData for Stream {
             |lua, this, (): ()| -> mlua::Result<Value> {
                 match this.frame()? {
                     Some(frame) => {
-                        let frame = lua.create_userdata(frame)?;
+                        let frame = lua.create_userdata(image::Reference::new(frame))?;
                         Ok(frame.to_value())
                     }
                     None => Ok(Value::Nil),
@@ -237,7 +238,7 @@ mod tests {
     use mlua::{AnyUserData, Function, Lua, ObjectLike, Table};
 
     use super::install;
-    use crate::{Image, Scale};
+    use crate::{Image, Scale, image};
 
     const PRODUCER: &str = r#"
 import sys
@@ -332,7 +333,7 @@ if fail:
             }
 
             let frame = frame.as_userdata().unwrap();
-            frames.push(frame.borrow::<Image>()?.clone());
+            frames.push(frame.borrow::<image::Reference>()?.image()?);
         }
     }
 
