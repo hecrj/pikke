@@ -403,6 +403,59 @@ end
     }
 
     #[test]
+    fn the_run_loads_the_shared_reference_once() {
+        let (engine, script_path) = load_script(
+            "shared-load",
+            r##"
+ARGUMENTS = { "data" }
+function render(args)
+  local base = image(args.data)
+  local left = base:clone()
+  local right = base:clone()
+
+  left:fill(rectangle({ x = 0, y = 0, size = { 16, 32 } }), "#FFFFFF")
+  right:fill(rectangle({ x = 16, y = 0, size = { 16, 32 } }), "#000000")
+
+  yield(left)
+  os.remove(args.data)
+  yield(right)
+end
+"##,
+        );
+
+        let data = script_path.parent().unwrap().join("data.png");
+        let source = crate::image::Image::new(
+            Scale::default(),
+            32.0,
+            32.0,
+            crate::Color::from_rgba_u8([200, 30, 60, 255]).srgb_to_linear(),
+        )
+        .unwrap();
+        source.write(&data).unwrap();
+
+        let dir = std::env::temp_dir().join(format!(
+            "pikke-engine-test-{}-shared-load",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let params: &[(String, Option<String>)] =
+            &[("data".to_string(), Some(data.display().to_string()))];
+
+        engine.run(params, Some(&dir.join("shared.png"))).unwrap();
+
+        let rgba: Vec<u8> = image::open(dir.join("shared.png"))
+            .unwrap()
+            .to_rgba8()
+            .into_raw();
+        let mut row = [255u8, 255, 255, 255].repeat(16);
+        row.extend([200, 30, 60, 255].repeat(16));
+        assert_eq!(rgba, row.repeat(32));
+        assert_eq!(packets(&dir.join("shared.mp4")), 2);
+        assert!(!data.exists());
+    }
+
+    #[test]
     fn the_run_yields_a_video() {
         let (engine, _path) = load_script(
             "video",

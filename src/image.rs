@@ -1996,6 +1996,43 @@ mod tests {
     }
 
     #[test]
+    fn the_divergent_branches_share_one_load() -> Result<()> {
+        let base_color = Color::from_rgba_u8([200, 30, 60, 255]).srgb_to_linear();
+        let source = Image::new(Scale::default(), 32.0, 32.0, base_color)?;
+        let file = std::env::temp_dir().join(format!(
+            "pikke-image-test-{}-shared-load.png",
+            std::process::id()
+        ));
+
+        let reference = Reference::load(&file, Scale::default());
+        let mut left = reference.clone();
+        let mut right = reference.clone();
+        left.fill(
+            Rectangle::new(0.0, 0.0, 16.0, 32.0),
+            Color::from_rgba_u8([255, 255, 255, 255]).srgb_to_linear(),
+        );
+        right.fill(
+            Rectangle::new(16.0, 0.0, 16.0, 32.0),
+            Color::from_rgba_u8([0, 0, 0, 255]).srgb_to_linear(),
+        );
+
+        source.write(&file)?;
+        let left = left.image()?;
+        std::fs::remove_file(&file)?;
+        let right = right.image()?;
+
+        let mut left_row = [255u8, 255, 255, 255].repeat(16);
+        left_row.extend([200, 30, 60, 255].repeat(16));
+        let mut right_row = [200u8, 30, 60, 255].repeat(16);
+        right_row.extend([0, 0, 0, 255].repeat(16));
+
+        assert_eq!(left.to_rgba8(), left_row.repeat(32));
+        assert_eq!(right.to_rgba8(), right_row.repeat(32));
+
+        Ok(())
+    }
+
+    #[test]
     fn the_blend_uses_the_other_as_it_was_at_the_call() -> Result<()> {
         let black = Color::from_rgba_u8([0, 0, 0, 255]).srgb_to_linear();
         let white = Color::from_rgba_u8([255, 255, 255, 255]).srgb_to_linear();
