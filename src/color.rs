@@ -1,4 +1,6 @@
-#[derive(Clone, Copy, Debug)]
+use mlua::UserData;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Color {
     pub r: f32,
     pub g: f32,
@@ -97,6 +99,8 @@ impl Color {
         }
     }
 }
+
+impl UserData for Color {}
 
 pub fn srgb_to_linear(stored: f32) -> f32 {
     if stored <= 0.04045 {

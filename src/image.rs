@@ -3,7 +3,7 @@ use std::path::{self, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use image::{ColorType, ImageFormat};
-use mlua::{AnyUserData, Lua, Table, UserData, UserDataFields, UserDataMethods};
+use mlua::{AnyUserData, Lua, Table, UserData, UserDataFields, UserDataMethods, Value};
 use skrifa::outline::{OutlineGlyphCollection, OutlinePen};
 use skrifa::prelude::{FontRef, GlyphId, LocationRef, NormalizedCoord, Size};
 use vello_cpu::kurbo::{Affine, BezPath, Rect};
@@ -562,6 +562,88 @@ impl Image {
         Ok(luma / ((right - left) * (bottom - top)) as f32 * 255.0)
     }
 
+    pub fn dominant_in(&self, region: Rectangle) -> Result<Color> {
+        #[derive(Clone, Default)]
+        struct Bucket {
+            weight: f32,
+            r: f32,
+            g: f32,
+            b: f32,
+            a: f32,
+        }
+
+        let scale = self.viewport.scale();
+        let left = scale.to_physical_signed(region.x)?;
+        let top = scale.to_physical_signed(region.y)?;
+        let right = scale.to_physical_signed(region.x + region.width)?;
+        let bottom = scale.to_physical_signed(region.y + region.height)?;
+
+        let left = left.max(0).min(self.width() as i32);
+        let top = top.max(0).min(self.height() as i32);
+        let right = right.max(0).min(self.width() as i32);
+        let bottom = bottom.max(0).min(self.height() as i32);
+
+        if left >= right || top >= bottom {
+            return Ok(Color::TRANSPARENT);
+        }
+
+        let (r, g, b, a) = (
+            &self.buffer.r,
+            &self.buffer.g,
+            &self.buffer.b,
+            &self.buffer.a,
+        );
+        let mut buckets = vec![Bucket::default(); 16 * 16 * 16];
+
+        for y in top..bottom {
+            for x in left..right {
+                let i = (y * self.width() as i32 + x) as usize;
+                let alpha = a[i];
+
+                if alpha > 0.0 {
+                    let r = r[i] / alpha;
+                    let g = g[i] / alpha;
+                    let b = b[i] / alpha;
+
+                    let index = (r * 15.0).round() as usize
+                        + (g * 15.0).round() as usize * 16
+                        + (b * 15.0).round() as usize;
+
+                    let bucket = &mut buckets[index];
+                    bucket.weight += alpha;
+                    bucket.r += r * alpha;
+                    bucket.g += g * alpha;
+                    bucket.b += b * alpha;
+                    bucket.a += alpha * alpha;
+                }
+            }
+        }
+
+        let best = buckets
+            .iter()
+            .enumerate()
+            .max_by(|(_, first), (_, second)| {
+                first
+                    .weight
+                    .partial_cmp(&second.weight)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+        let bucket = &buckets[best];
+
+        if bucket.weight == 0.0 {
+            return Ok(Color::TRANSPARENT);
+        }
+
+        Ok(Color {
+            r: bucket.r / bucket.weight,
+            g: bucket.g / bucket.weight,
+            b: bucket.b / bucket.weight,
+            a: bucket.a / bucket.weight,
+        })
+    }
+
     pub fn write(&self, output: &path::Path) -> Result<()> {
         let file_name = output.file_name().ok_or_else(|| {
             io::Error::other(format!("invalid output path: {}", output.display()))
@@ -677,6 +759,10 @@ impl Reference {
 
     fn luma_in(&self, region: Rectangle) -> Result<f32> {
         self.evaluate(|image| image.luma_in(region))
+    }
+
+    fn dominant_in(&self, region: Rectangle) -> Result<Color> {
+        self.evaluate(|image| image.dominant_in(region))
     }
 
     fn evaluate<T>(&self, f: impl FnOnce(&mut Image) -> Result<T>) -> Result<T> {
@@ -895,7 +981,7 @@ impl OutlinePen for PathPen {
     }
 }
 
-fn paint_from_hex(operation: &str, color: &str) -> mlua::Result<Color> {
+fn color_from_hex(operation: &str, color: &str) -> mlua::Result<Color> {
     let message = || format!("{operation}: {color} is not a #RRGGBB hex color");
     let digits = color
         .strip_prefix('#')
@@ -907,7 +993,12 @@ fn paint_from_hex(operation: &str, color: &str) -> mlua::Result<Color> {
             .map_err(|_| mlua::Error::RuntimeError(message()))
     };
 
-    Ok(Color::from_rgba_u8([channel(0)?, channel(2)?, channel(4)?, 255]).srgb_to_linear())
+    Ok(Color::from_rgba_u8([
+        channel(0)?,
+        channel(2)?,
+        channel(4)?,
+        255,
+    ]))
 }
 
 impl UserData for Reference {
@@ -1015,8 +1106,21 @@ impl UserData for Reference {
         );
         methods.add_method_mut(
             "fill",
-            |_lua, this, (region, color): (AnyUserData, String)| -> mlua::Result<()> {
-                let paint = paint_from_hex("fill", &color)?;
+            |_lua, this, (region, color): (AnyUserData, Value)| -> mlua::Result<()> {
+                let paint = if let Some(color) = color.as_string() {
+                    color_from_hex("fill", &color.to_str()?)?
+                } else if let Some(color) = color
+                    .as_userdata()
+                    .and_then(|color| color.borrow::<Color>().ok())
+                {
+                    *color
+                } else {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "fill: the color must be a `Color`, or a hex string (was {})",
+                        color.type_name()
+                    )));
+                }
+                .srgb_to_linear();
 
                 if let Ok(rectangle) = region.borrow::<Rectangle>() {
                     this.fill(*rectangle, paint);
@@ -1042,6 +1146,14 @@ impl UserData for Reference {
             |_lua, this, region: AnyUserData| -> mlua::Result<f32> {
                 let region: Rectangle = *region.borrow::<Rectangle>()?;
                 Ok(this.luma_in(region)?)
+            },
+        );
+
+        methods.add_method(
+            "dominant_in",
+            |_lua, this, region: AnyUserData| -> mlua::Result<Color> {
+                let region: Rectangle = *region.borrow::<Rectangle>()?;
+                Ok(this.dominant_in(region)?.linear_to_srgb())
             },
         );
     }
@@ -1081,7 +1193,7 @@ pub fn install(lua: &Lua, env: &Table, script_dir: &path::Path, scale: Scale) ->
             }
 
             let paint = if let Some(color) = color {
-                paint_from_hex("blank", &color)?
+                color_from_hex("blank", &color)?.srgb_to_linear()
             } else {
                 Color::TRANSPARENT
             };
@@ -1430,6 +1542,63 @@ mod tests {
 
         let full = image.luma_in(Rectangle::new(0.0, 0.0, 1640.0, 2048.0))?;
         assert!((full - 11.452538).abs() < 1e-2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn the_dominant_in_is_the_mean_of_the_dominant_bucket() -> Result<()> {
+        let viewport = Viewport::from_logical(4.0, 4.0, Scale::default())?;
+        let mut rgba = vec![0u8; 16 * 4];
+        rgba[..12 * 4].copy_from_slice(&[200, 30, 60, 255].repeat(12));
+        rgba[12 * 4..].copy_from_slice(&[0, 0, 255, 255].repeat(4));
+        let image = Image::from_rgba8(viewport, &rgba)?;
+
+        let dominant = image.dominant_in(Rectangle::new(0.0, 0.0, 4.0, 4.0))?;
+
+        assert_eq!(dominant.linear_to_srgb().to_rgba_u8(), [200, 30, 60, 255]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn the_dominant_in_blends_the_members_of_its_bucket() -> Result<()> {
+        let viewport = Viewport::from_logical(2.0, 1.0, Scale::default())?;
+        let rgba = [200, 30, 60, 255, 202, 32, 62, 255];
+        let image = Image::from_rgba8(viewport, &rgba)?;
+
+        let dominant = image.dominant_in(Rectangle::new(0.0, 0.0, 2.0, 1.0))?;
+
+        assert_eq!(dominant.linear_to_srgb().to_rgba_u8(), [201, 31, 61, 255]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn the_dominant_in_ignores_the_transparent_pixels() -> Result<()> {
+        let viewport = Viewport::from_logical(2.0, 2.0, Scale::default())?;
+        let rgba = [0, 255, 0, 255, 255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0];
+        let image = Image::from_rgba8(viewport, &rgba)?;
+
+        let dominant = image.dominant_in(Rectangle::new(0.0, 0.0, 2.0, 2.0))?;
+
+        assert_eq!(dominant.linear_to_srgb().to_rgba_u8(), [0, 255, 0, 255]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn the_dominant_in_is_transparent_outside_the_image_or_on_a_transparent_region() -> Result<()> {
+        let image = Image::new(Scale::default(), 4.0, 4.0, Color::TRANSPARENT)?;
+
+        assert_eq!(
+            image.dominant_in(Rectangle::new(0.0, 0.0, 4.0, 4.0))?,
+            Color::TRANSPARENT
+        );
+        assert_eq!(
+            image.dominant_in(Rectangle::new(10.0, 10.0, 2.0, 2.0))?,
+            Color::TRANSPARENT
+        );
 
         Ok(())
     }
@@ -1943,6 +2112,19 @@ mod tests {
             assert!(error.to_string().contains("not a #RRGGBB hex color"));
         }
 
+        for color in ["42", "{}"] {
+            let error = lua
+                .load(format!("output:fill(region, {color})"))
+                .set_environment(env.clone())
+                .eval::<()>()
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("the color must be a `Color`, or a hex string")
+            );
+        }
+
         let error = lua
             .load("output:fill(output, \"#000000\")")
             .set_environment(env.clone())
@@ -1966,6 +2148,38 @@ mod tests {
         let painted = output.borrow::<Reference>().unwrap().image().unwrap();
         assert!(painted.buffer.r[5] > 0.0);
         assert_eq!(painted.buffer.a[5], 1.0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn the_dominant_in_feeds_the_fill_as_a_color() -> Result<()> {
+        let lua = Lua::new();
+        let source = Image::new(
+            Scale::default(),
+            4.0,
+            4.0,
+            Color::from_rgba_u8([200, 30, 60, 255]).srgb_to_linear(),
+        )?;
+        let source = lua.create_userdata(Reference::new(source)).unwrap();
+        let target = Image::new(Scale::default(), 4.0, 4.0, Color::TRANSPARENT)?;
+        let target = lua.create_userdata(Reference::new(target)).unwrap();
+        let region = lua
+            .create_userdata(Rectangle::new(0.0, 0.0, 4.0, 4.0))
+            .unwrap();
+
+        let env = lua.create_table().unwrap();
+        env.set("source", source).unwrap();
+        env.set("target", target.clone()).unwrap();
+        env.set("region", region).unwrap();
+
+        lua.load("local color = source:dominant_in(region)\ntarget:fill(region, color)")
+            .set_environment(env)
+            .eval::<()>()
+            .unwrap();
+
+        let painted = target.borrow::<Reference>().unwrap().image().unwrap();
+        assert_eq!(painted.to_rgba8(), [200, 30, 60, 255].repeat(16));
 
         Ok(())
     }
