@@ -16,19 +16,26 @@ use crate::color::{Color, Filter, Space, crop, luma_linear, resize};
 use crate::text::Text;
 use crate::{Error, Path, Rectangle, Result, Scale, Viewport};
 
-#[derive(Clone, Debug)]
+#[derive(Debug, Clone)]
 pub struct Image {
     buffer: Arc<Buffer>,
     viewport: Viewport,
     target_scale: Scale,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug, Clone)]
 struct Buffer {
     r: Vec<f32>,
     g: Vec<f32>,
     b: Vec<f32>,
     a: Vec<f32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Dimension {
+    Width(f32),
+    Height(f32),
+    Both { width: f32, height: f32 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -128,12 +135,22 @@ impl Image {
 
     pub fn resize(
         &mut self,
-        new_width: f32,
-        new_height: f32,
+        dimension: Dimension,
         filter: Filter,
         mode: Mode,
         scale: Option<Scale>,
     ) -> Result<()> {
+        let (new_width, new_height) = match dimension {
+            Dimension::Width(width) => {
+                (width, width * self.logical_height() / self.logical_width())
+            }
+            Dimension::Height(height) => (
+                height * self.logical_width() / self.logical_height(),
+                height,
+            ),
+            Dimension::Both { width, height } => (width, height),
+        };
+
         let new_viewport =
             Viewport::from_logical(new_width, new_height, scale.unwrap_or(self.target_scale))?;
 
@@ -228,8 +245,10 @@ impl Image {
             let mut other = other.clone();
 
             other.resize(
-                other.logical_width(),
-                other.logical_height(),
+                Dimension::Both {
+                    width: other.logical_width(),
+                    height: other.logical_height(),
+                },
                 Filter::default(),
                 Mode::Stretch,
                 Some(scale),
@@ -579,18 +598,10 @@ impl Reference {
         })))
     }
 
-    fn resize(
-        &mut self,
-        new_width: f32,
-        new_height: f32,
-        filter: Filter,
-        mode: Mode,
-        scale: Option<Scale>,
-    ) {
+    fn resize(&mut self, dimension: Dimension, filter: Filter, mode: Mode, scale: Option<Scale>) {
         self.replace(|source| Thunk::Resize {
             source,
-            new_width,
-            new_height,
+            dimension,
             filter,
             mode,
             scale,
@@ -677,8 +688,7 @@ pub enum Thunk {
     Snapshot(Reference),
     Resize {
         source: Reference,
-        new_width: f32,
-        new_height: f32,
+        dimension: Dimension,
         filter: Filter,
         mode: Mode,
         scale: Option<Scale>,
@@ -718,13 +728,12 @@ impl Thunk {
             Thunk::Snapshot(reference) => reference.evaluate(|image| Ok(image.clone())),
             Thunk::Resize {
                 source,
-                new_width,
-                new_height,
+                dimension,
                 filter,
                 mode,
                 scale,
             } => source.evaluate(|source| {
-                source.resize(*new_width, *new_height, *filter, *mode, *scale)?;
+                source.resize(*dimension, *filter, *mode, *scale)?;
                 Ok(source.clone())
             }),
             Thunk::Autocontrast { source } => source.evaluate(|source| {
@@ -892,16 +901,10 @@ impl UserData for Reference {
             let filter: Option<String> = opts.get("filter")?;
             let mode: Option<String> = opts.get("mode")?;
 
-            let (width, height) = match (width, height) {
-                (Some(width), Some(height)) => (width, height),
-                (Some(width), None) => (
-                    width,
-                    width * this.logical_height()? / this.logical_width()?,
-                ),
-                (None, Some(height)) => (
-                    height * this.logical_width()? / this.logical_height()?,
-                    height,
-                ),
+            let dimension = match (width, height) {
+                (Some(width), Some(height)) => Dimension::Both { width, height },
+                (Some(width), None) => Dimension::Width(width),
+                (None, Some(height)) => Dimension::Height(height),
                 (None, None) => {
                     return Err(mlua::Error::RuntimeError(
                         "resize: needs width or height".to_owned(),
@@ -930,7 +933,7 @@ impl UserData for Reference {
                 }
             };
 
-            this.resize(width, height, filter, mode, None);
+            this.resize(dimension, filter, mode, None);
             Ok(())
         });
         methods.add_method_mut(
@@ -1055,7 +1058,7 @@ mod tests {
 
     use mlua::{AnyUserData, Function, Lua, Table};
 
-    use super::{Buffer, Filter, Image, Mode, Reference, install};
+    use super::{Buffer, Dimension, Filter, Image, Mode, Reference, install};
     use crate::color::{Color, Space, luma_linear};
     use crate::text::Text;
     use crate::{Rectangle, Result, Scale, Viewport};
@@ -1188,8 +1191,10 @@ mod tests {
         let mut fork = image.clone();
 
         image.resize(
-            200.0,
-            250.0,
+            Dimension::Both {
+                width: 200.0,
+                height: 250.0,
+            },
             Filter::Lanczos,
             Mode::Stretch,
             Some(Scale::new(0.5)),
@@ -1200,8 +1205,10 @@ mod tests {
         assert_eq!(fork.buffer.r[0], first_pixel);
 
         fork.resize(
-            400.0,
-            100.0,
+            Dimension::Both {
+                width: 400.0,
+                height: 100.0,
+            },
             Filter::Cubic,
             Mode::Cover,
             Some(Scale::new(0.5)),
@@ -1210,8 +1217,10 @@ mod tests {
 
         let mut image = Image::load(&path, Scale::new(2.0)).unwrap();
         image.resize(
-            256.0,
-            256.0,
+            Dimension::Both {
+                width: 256.0,
+                height: 256.0,
+            },
             Filter::Cubic,
             Mode::Stretch,
             Some(Scale::new(2.0)),
@@ -1241,12 +1250,51 @@ mod tests {
         for filter in [Filter::Cubic, Filter::Lanczos] {
             for target in [4.0, 16.0] {
                 let mut image = square([0.5, 0.5, 0.5, 1.0], 8, Scale::default())?;
-                image.resize(target, target, filter, Mode::Stretch, None)?;
+                image.resize(
+                    Dimension::Both {
+                        width: target,
+                        height: target,
+                    },
+                    filter,
+                    Mode::Stretch,
+                    None,
+                )?;
                 for pixel in image.to_rgba8().chunks(4) {
                     assert_eq!(pixel, &expected);
                 }
             }
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn the_resize_keeps_the_aspect_for_a_single_dimension() -> Result<()> {
+        let color = Color::from_rgba_u8([200, 30, 60, 255]).srgb_to_linear();
+
+        let mut image = Image::new(Scale::default(), 64.0, 32.0, color)?;
+        image.resize(
+            Dimension::Width(128.0),
+            Filter::default(),
+            Mode::default(),
+            None,
+        )?;
+        assert_eq!(
+            (image.logical_width(), image.logical_height()),
+            (128.0, 64.0)
+        );
+
+        let mut image = Image::new(Scale::default(), 64.0, 32.0, color)?;
+        image.resize(
+            Dimension::Height(16.0),
+            Filter::default(),
+            Mode::default(),
+            None,
+        )?;
+        assert_eq!(
+            (image.logical_width(), image.logical_height()),
+            (32.0, 16.0)
+        );
 
         Ok(())
     }
@@ -1628,8 +1676,10 @@ mod tests {
 
         let mut expected = layer.clone();
         expected.resize(
-            512.0,
-            512.0,
+            Dimension::Both {
+                width: 512.0,
+                height: 512.0,
+            },
             Filter::default(),
             Mode::Stretch,
             Some(Scale::new(0.5)),
@@ -1986,7 +2036,15 @@ mod tests {
 
         assert_eq!(branch.logical_width()?, 512.0);
 
-        reference.resize(128.0, 128.0, Filter::Cubic, Mode::Stretch, None);
+        reference.resize(
+            Dimension::Both {
+                width: 128.0,
+                height: 128.0,
+            },
+            Filter::Cubic,
+            Mode::Stretch,
+            None,
+        );
 
         assert_eq!(reference.logical_width()?, 128.0);
         assert_eq!(branch.logical_width()?, 512.0);
@@ -2041,7 +2099,15 @@ mod tests {
         let mut layer = Reference::blank(Scale::default(), 50.0, 50.0, white);
 
         base.blend(&layer, Rectangle::new(0.0, 0.0, 50.0, 50.0), Space::Linear);
-        layer.resize(25.0, 25.0, Filter::Cubic, Mode::Stretch, None);
+        layer.resize(
+            Dimension::Both {
+                width: 25.0,
+                height: 25.0,
+            },
+            Filter::Cubic,
+            Mode::Stretch,
+            None,
+        );
 
         assert_eq!(layer.logical_width()?, 25.0);
 
