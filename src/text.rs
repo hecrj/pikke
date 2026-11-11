@@ -88,6 +88,11 @@ impl Text {
         runs_of(&self.layout)
     }
 
+    pub fn move_to(&mut self, x: f32, y: f32) {
+        self.x = x;
+        self.y = y;
+    }
+
     pub fn translate(&mut self, dx: f32, dy: f32) {
         self.x += dx;
         self.y += dy;
@@ -243,34 +248,41 @@ impl UserData for Text {
     }
 
     fn add_methods<M: UserDataMethods<Text>>(methods: &mut M) {
+        fn number(op: &str, name: &str, value: Option<Value>) -> mlua::Result<f32> {
+            let value = match value {
+                None => 0.0,
+                Some(Value::Number(value)) => value as f32,
+                Some(Value::Integer(value)) => value as f32,
+                Some(_) => {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "{op}: '{name}' is not a number"
+                    )));
+                }
+            };
+
+            if !value.is_finite() {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "{op}: '{name}' must be finite"
+                )));
+            }
+
+            Ok(value)
+        }
+
+        methods.add_method_mut("move_to", |_lua, this, offset: Table| -> mlua::Result<()> {
+            let x = number("move_to", "x", offset.get("x")?)?;
+            let y = number("move_to", "y", offset.get("y")?)?;
+
+            this.move_to(x, y);
+
+            Ok(())
+        });
+
         methods.add_method_mut(
             "translate",
             |_lua, this, offset: Table| -> mlua::Result<()> {
-                let number = |name: &str, value: Option<Value>| -> mlua::Result<f32> {
-                    match value {
-                        None => Ok(0.0),
-                        Some(Value::Number(value)) => Ok(value as f32),
-                        Some(Value::Integer(value)) => Ok(value as f32),
-                        Some(_) => Err(mlua::Error::RuntimeError(format!(
-                            "translate: '{name}' is not a number"
-                        ))),
-                    }
-                };
-
-                let dx = number("x", offset.get("x")?)?;
-                let dy = number("y", offset.get("y")?)?;
-
-                if !dx.is_finite() {
-                    return Err(mlua::Error::RuntimeError(
-                        "translate: 'x' must be finite".to_owned(),
-                    ));
-                }
-
-                if !dy.is_finite() {
-                    return Err(mlua::Error::RuntimeError(
-                        "translate: 'y' must be finite".to_owned(),
-                    ));
-                }
+                let dx = number("translate", "x", offset.get("x")?)?;
+                let dy = number("translate", "y", offset.get("y")?)?;
 
                 this.translate(dx, dy);
 
@@ -633,5 +645,58 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("translate: 'y' must be finite"));
+    }
+
+    #[test]
+    fn the_move_to_sets_logical_positions() {
+        let (lua, env, text) = text_value(20.0, 40.0, 2.0);
+        let offset = lua.create_table().unwrap();
+        offset.set("x", 1.5).unwrap();
+        offset.set("y", -2.5).unwrap();
+        env.set("offset", offset).unwrap();
+        lua.load("text:move_to(offset)")
+            .set_environment(env)
+            .eval::<()>()
+            .unwrap();
+        let moved = text.borrow::<Text>().unwrap().clone();
+        assert_eq!((moved.x, moved.y), (1.5, -2.5));
+    }
+
+    #[test]
+    fn the_move_to_defaults_omitted_coordinates_to_zero() {
+        let (lua, env, text) = text_value(10.0, 20.0, 1.0);
+        lua.load("text:move_to({})")
+            .set_environment(env)
+            .eval::<()>()
+            .unwrap();
+        let moved = text.borrow::<Text>().unwrap().clone();
+        assert_eq!((moved.x, moved.y), (0.0, 0.0));
+    }
+
+    #[test]
+    fn the_move_to_validates_its_arguments() {
+        let (lua, env, _text) = text_value(10.0, 20.0, 1.0);
+
+        let offset = lua.create_table().unwrap();
+        offset.set("x", "left").unwrap();
+        env.set("offset", offset).unwrap();
+        let error = lua
+            .load("text:move_to(offset)")
+            .set_environment(env.clone())
+            .eval::<()>()
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("move_to: 'x' is not a number"));
+
+        let offset = lua.create_table().unwrap();
+        offset.set("y", f64::INFINITY).unwrap();
+        env.set("offset", offset).unwrap();
+        let error = lua
+            .load("text:move_to(offset)")
+            .set_environment(env)
+            .eval::<()>()
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("move_to: 'y' must be finite"));
     }
 }
