@@ -119,6 +119,12 @@ change is a script edit; an op-behavior change is an engine edit.
 | `line_to` | `path:line_to({x, y})` | Extend the current subpath with a straight line to a logical point (`x`/`y` default 0). In place. |
 | `close` | `path:close()` | Close the current subpath. In place. |
 
+### Color methods
+
+| op | signature | meaning |
+|---|---|---|
+| `with_luma` | `color:with_luma(luma) → Color` | A new `Color` whose luma (see *Luma*) is `luma` (0–1): the linear channels scale proportionally (the hue is preserved) and clamp — a target the hue can't carry falls short, and black stays black. |
+
 ### Output
 
 | op | signature | meaning |

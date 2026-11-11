@@ -1,4 +1,4 @@
-use mlua::UserData;
+use mlua::{UserData, UserDataMethods, Value};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Color {
@@ -98,9 +98,57 @@ impl Color {
             a: self.a,
         }
     }
+
+    pub fn with_luma(self, luma: f32) -> Self {
+        let luma = luma.clamp(0.0, 1.0);
+        let current = luma_linear(self.r, self.g, self.b);
+
+        if current == 0.0 {
+            return Self {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: self.a,
+            };
+        }
+
+        let scale = luma / current;
+
+        Self {
+            r: (self.r * scale).clamp(0.0, 1.0),
+            g: (self.g * scale).clamp(0.0, 1.0),
+            b: (self.b * scale).clamp(0.0, 1.0),
+            a: self.a,
+        }
+    }
 }
 
-impl UserData for Color {}
+impl UserData for Color {
+    fn add_methods<M: UserDataMethods<Color>>(methods: &mut M) {
+        methods.add_method(
+            "with_luma",
+            |_lua, this, luma: Value| -> mlua::Result<Color> {
+                let luma = match luma {
+                    Value::Number(luma) => luma as f32,
+                    Value::Integer(luma) => luma as f32,
+                    _ => {
+                        return Err(mlua::Error::RuntimeError(
+                            "with_luma: 'luma' is not a number".to_owned(),
+                        ));
+                    }
+                };
+
+                if !luma.is_finite() {
+                    return Err(mlua::Error::RuntimeError(
+                        "with_luma: 'luma' must be finite".to_owned(),
+                    ));
+                }
+
+                Ok(this.srgb_to_linear().with_luma(luma).linear_to_srgb())
+            },
+        );
+    }
+}
 
 pub fn srgb_to_linear(stored: f32) -> f32 {
     if stored <= 0.04045 {
@@ -357,5 +405,124 @@ mod kernels {
             let sum: f64 = (-3..=3).map(|d| cubic(x - d as f64)).sum();
             assert!((sum - 1.0).abs() < 1e-12);
         }
+    }
+}
+
+#[cfg(test)]
+mod with_luma {
+    use super::{Color, luma_linear};
+
+    #[test]
+    fn the_with_luma_hits_the_target_and_keeps_the_ratios() {
+        let color = Color {
+            r: 0.5,
+            g: 0.25,
+            b: 0.125,
+            a: 1.0,
+        };
+        let result = color.with_luma(0.1);
+
+        assert!((luma_linear(result.r, result.g, result.b) - 0.1).abs() < 1e-6);
+        assert_eq!(result.g, result.r / 2.0);
+        assert_eq!(result.b, result.r / 4.0);
+        assert_eq!(result.a, 1.0);
+    }
+
+    #[test]
+    fn the_with_luma_keeps_black_black() {
+        let black = Color {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        };
+
+        assert_eq!(black.with_luma(0.5), black);
+    }
+
+    #[test]
+    fn the_with_luma_clamps_the_channels() {
+        let result = Color {
+            r: 0.0,
+            g: 0.0,
+            b: 1.0,
+            a: 1.0,
+        }
+        .with_luma(0.3);
+
+        assert_eq!(
+            result,
+            Color {
+                r: 0.0,
+                g: 0.0,
+                b: 1.0,
+                a: 1.0
+            }
+        );
+    }
+
+    #[test]
+    fn the_with_luma_clamps_the_target_to_zero_and_one() {
+        let white = Color {
+            r: 1.0,
+            g: 1.0,
+            b: 1.0,
+            a: 1.0,
+        };
+
+        assert_eq!(white.with_luma(-1.0).r, 0.0);
+        assert_eq!(white.with_luma(2.0), white);
+    }
+
+    #[test]
+    fn the_with_luma_binding_scales_a_color() {
+        let lua = mlua::Lua::new();
+        let color = lua
+            .create_userdata(Color::from_rgba_u8([128, 128, 128, 255]))
+            .unwrap();
+
+        let env = lua.create_table().unwrap();
+        env.set("color", color).unwrap();
+
+        let result: mlua::AnyUserData = lua
+            .load("color:with_luma(0.0)")
+            .set_environment(env.clone())
+            .eval()
+            .unwrap();
+        let result = *result.borrow::<Color>().unwrap();
+        assert_eq!(result.to_rgba_u8(), [0, 0, 0, 255]);
+
+        let result: mlua::AnyUserData = lua
+            .load("color:with_luma(1.0)")
+            .set_environment(env.clone())
+            .eval()
+            .unwrap();
+        let result = *result.borrow::<Color>().unwrap();
+        assert_eq!(result.to_rgba_u8(), [255, 255, 255, 255]);
+
+        let result: mlua::AnyUserData = lua
+            .load("color:with_luma(0.215744)")
+            .set_environment(env.clone())
+            .eval()
+            .unwrap();
+        let result = *result.borrow::<Color>().unwrap();
+        assert_eq!(result.to_rgba_u8(), [128, 128, 128, 255]);
+
+        let error = lua
+            .load("color:with_luma('x')")
+            .set_environment(env.clone())
+            .eval::<()>()
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("with_luma: 'luma' is not a number"));
+
+        env.set("huge", f64::INFINITY).unwrap();
+        let error = lua
+            .load("color:with_luma(huge)")
+            .set_environment(env)
+            .eval::<()>()
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("with_luma: 'luma' must be finite"));
     }
 }
