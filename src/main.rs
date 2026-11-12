@@ -4,6 +4,7 @@ mod engine;
 mod error;
 mod font;
 mod image;
+mod lua;
 mod path;
 mod rectangle;
 mod scale;

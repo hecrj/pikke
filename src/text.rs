@@ -10,6 +10,7 @@ use skrifa::outline::{OutlineGlyphCollection, OutlinePen};
 use skrifa::prelude::{FontRef, GlyphId, LocationRef, NormalizedCoord, Size};
 
 use crate::font::Font;
+use crate::lua;
 use crate::{Rectangle, Result, Scale, Viewport};
 
 static LAYOUTS: LazyLock<Mutex<LayoutContext<()>>> =
@@ -248,30 +249,9 @@ impl UserData for Text {
     }
 
     fn add_methods<M: UserDataMethods<Text>>(methods: &mut M) {
-        fn number(op: &str, name: &str, value: Option<Value>) -> mlua::Result<f32> {
-            let value = match value {
-                None => 0.0,
-                Some(Value::Number(value)) => value as f32,
-                Some(Value::Integer(value)) => value as f32,
-                Some(_) => {
-                    return Err(mlua::Error::RuntimeError(format!(
-                        "{op}: '{name}' is not a number"
-                    )));
-                }
-            };
-
-            if !value.is_finite() {
-                return Err(mlua::Error::RuntimeError(format!(
-                    "{op}: '{name}' must be finite"
-                )));
-            }
-
-            Ok(value)
-        }
-
         methods.add_method_mut("move_to", |_lua, this, offset: Table| -> mlua::Result<()> {
-            let x = number("move_to", "x", offset.get("x")?)?;
-            let y = number("move_to", "y", offset.get("y")?)?;
+            let x = lua::number("move_to", "x", offset.get("x")?)?;
+            let y = lua::number("move_to", "y", offset.get("y")?)?;
 
             this.move_to(x, y);
 
@@ -281,8 +261,8 @@ impl UserData for Text {
         methods.add_method_mut(
             "translate",
             |_lua, this, offset: Table| -> mlua::Result<()> {
-                let dx = number("translate", "x", offset.get("x")?)?;
-                let dy = number("translate", "y", offset.get("y")?)?;
+                let dx = lua::number("translate", "x", offset.get("x")?)?;
+                let dy = lua::number("translate", "y", offset.get("y")?)?;
 
                 this.translate(dx, dy);
 

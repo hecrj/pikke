@@ -498,9 +498,9 @@ impl Image {
                 let color = self.buffer.at(i);
 
                 if color.a > 0.0 {
-                    let r = color.r / color.a;
-                    let g = color.g / color.a;
-                    let b = color.b / color.a;
+                    let r = (color.r / color.a).clamp(0.0, 1.0);
+                    let g = (color.g / color.a).clamp(0.0, 1.0);
+                    let b = (color.b / color.a).clamp(0.0, 1.0);
 
                     let index = (r * 15.0).round() as usize
                         + (g * 15.0).round() as usize * 16
@@ -987,9 +987,14 @@ impl UserData for Reference {
                     .and_then(|color| color.borrow::<Color>().ok())
                 {
                     *color
+                } else if let Some(color) = color
+                    .as_userdata()
+                    .and_then(|color| color.borrow::<color::Oklch>().ok())
+                {
+                    color.to_linear_rgb()
                 } else {
                     return Err(mlua::Error::RuntimeError(format!(
-                        "fill: the color must be a `Color`, or a hex string (was {})",
+                        "fill: the color must be a `Color`, an `Oklch`, or a hex string (was {})",
                         color.type_name()
                     )));
                 };
@@ -1949,7 +1954,7 @@ mod tests {
             assert!(
                 error
                     .to_string()
-                    .contains("the color must be a `Color`, or a hex string")
+                    .contains("the color must be a `Color`, an `Oklch`, or a hex string")
             );
         }
 
@@ -1976,6 +1981,39 @@ mod tests {
         let painted = output.borrow::<Reference>().unwrap().image().unwrap();
         assert!(painted.buffer.at(5).r > 0.0);
         assert_eq!(painted.buffer.at(5).a, 1.0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn the_fill_accepts_an_oklch() -> Result<()> {
+        let lua = Lua::new();
+        let image = Image::new(Scale::default(), 4.0, 4.0, Color::TRANSPARENT)?;
+        let output = lua.create_userdata(Reference::new(image)).unwrap();
+        let region = lua
+            .create_userdata(Rectangle::new(0.0, 0.0, 4.0, 4.0))
+            .unwrap();
+        let oklch = lua
+            .create_userdata(color::Oklch {
+                l: 0.7,
+                c: 0.15,
+                h: 260.0,
+                a: 1.0,
+            })
+            .unwrap();
+
+        let env = lua.create_table().unwrap();
+        env.set("output", output.clone()).unwrap();
+        env.set("region", region.clone()).unwrap();
+        env.set("oklch", oklch).unwrap();
+
+        lua.load("output:fill(region, oklch)")
+            .set_environment(env)
+            .eval::<()>()
+            .unwrap();
+
+        let painted = output.borrow::<Reference>().unwrap().image().unwrap();
+        assert_eq!(painted.to_rgba8(), [101, 157, 251, 255].repeat(16));
 
         Ok(())
     }
@@ -2008,6 +2046,43 @@ mod tests {
 
         let painted = target.borrow::<Reference>().unwrap().image().unwrap();
         assert_eq!(painted.to_rgba8(), [200, 30, 60, 255].repeat(16));
+
+        Ok(())
+    }
+
+    #[test]
+    fn the_dominant_in_clamps_out_of_gamut_channels() -> Result<()> {
+        let lua = Lua::new();
+        let image = Image::new(Scale::default(), 4.0, 4.0, Color::TRANSPARENT)?;
+        let output = lua.create_userdata(Reference::new(image)).unwrap();
+        let region = lua
+            .create_userdata(Rectangle::new(0.0, 0.0, 4.0, 4.0))
+            .unwrap();
+        let oklch = lua
+            .create_userdata(color::Oklch {
+                l: 0.5,
+                c: 0.5,
+                h: 260.0,
+                a: 1.0,
+            })
+            .unwrap();
+
+        let env = lua.create_table().unwrap();
+        env.set("output", output.clone()).unwrap();
+        env.set("region", region.clone()).unwrap();
+        env.set("oklch", oklch).unwrap();
+
+        lua.load("output:fill(region, oklch)\ndominant = output:dominant_in(region)")
+            .set_environment(env.clone())
+            .eval::<()>()
+            .unwrap();
+
+        let dominant: AnyUserData = env.get("dominant").unwrap();
+        let color = dominant.borrow::<Color>().unwrap();
+        assert!((color.r - 0.0120694).abs() < 1e-5);
+        assert_eq!(color.g, 0.0);
+        assert_eq!(color.b, 1.0);
+        assert_eq!(color.a, 1.0);
 
         Ok(())
     }

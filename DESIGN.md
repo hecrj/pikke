@@ -94,9 +94,9 @@ change is a script edit; an op-behavior change is an engine edit.
 | `invert` | `img:invert()` | Invert every pixel's color: the unpremultiplied channels become `1 − c`, the alpha is unchanged. In place. |
 | `resize` | `img:resize({width, height, mode, filter})` | Scale to the target (logical px): exactly one of `width`/`height` — aspect preserved; both — the target box, `mode = "cover"` covers it and center-crops, no `mode` scales to it exactly; `filter = "lanczos"` or `"cubic"` (default). In place. |
 | `blend` | `img:blend(other, {at, color_space})` | Alpha-composite `other` over `img`, `other`'s top-left at `at` (a `Rectangle`, default `(0, 0)`), clipped to the receiver. `color_space`: `"linear"` (default) / `"srgb"`. In place. |
-| `fill` | `img:fill(region, color)` | Paint `region` (a `Rectangle`, `Text`, or `Path`) with `color` (a `Color`, or a hex string). The space is chosen by the region's kind: a `Text` region composites in sRGB, a `Rectangle` or `Path` region in linear. In place. |
+| `fill` | `img:fill(region, color)` | Paint `region` (a `Rectangle`, `Text`, or `Path`) with `color` (a `Color`, an `Oklch`, or a hex string). The space is chosen by the region's kind: a `Text` region composites in sRGB, a `Rectangle` or `Path` region in linear. In place. |
 | `luma_in` | `img:luma_in(region) → number` | Mean luma of `region` (a `Rectangle`), 0–255 (see *Luma*). |
-| `dominant_in` | `img:dominant_in(region) → Color` | The dominant color of `region` (a `Rectangle`): the demultiplied linear channels quantized to 4 bits, the most-populated bucket weighted by alpha, returned as that bucket's alpha-weighted mean. An empty or fully transparent region is transparent. |
+| `dominant_in` | `img:dominant_in(region) → Color` | The dominant color of `region` (a `Rectangle`): the demultiplied linear channels, clamped to 0–1, quantized to 4 bits, the most-populated bucket weighted by alpha, returned as that bucket's alpha-weighted mean. An empty or fully transparent region is transparent. |
 | `width` | `img.width → number` | The image's width in logical px. |
 | `height` | `img.height → number` | The image's height in logical px. |
 | `physical_width` | `img.physical_width → number` | The image's width in physical px (the run scale). |
@@ -124,6 +124,7 @@ change is a script edit; an op-behavior change is an engine edit.
 | op | signature | meaning |
 |---|---|---|
 | `with_luma` | `color:with_luma(luma) → Color` | A new `Color` whose luma (see *Luma*) is `luma` (0–1): the linear channels scale proportionally (the hue is preserved) and clamp — a target the hue can't carry falls short, and black stays black. |
+| `to_oklch` | `color:to_oklch() → Oklch` | The color in Oklch (see *Oklch*): lightness, chroma, hue in degrees, alpha. The inverse of the `Oklch` transform that `fill` applies. |
 
 ### Output
 
@@ -184,6 +185,18 @@ difference is confined to partially transparent pixels.
 luma `0.2126·R + 0.7152·G + 0.0722·B` per pixel (0–255). Thresholds
 on the mean are a *script* decision — the engine only supplies the
 mean luma.
+
+### Oklch
+
+`Oklch` is a color in the cylindrical Oklab space:
+`l` lightness (0–1), `c` chroma, `h` hue in degrees (0–360), `a`
+alpha (0–1). All four fields are readable and settable; `to_oklch`
+returns `h` canonicalized to 0–360.
+
+`fill` transforms an `Oklch` to a linear `Color` before painting (the
+inverse of `to_oklch`). Out-of-gamut chroma yields linear channels
+outside 0–1 (linear light is unbounded); the encode and the
+bounded-domain ops (`dominant_in`) clamp to the gamut.
 
 ## Units
 

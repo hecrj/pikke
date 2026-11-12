@@ -1,6 +1,8 @@
 use std::marker::PhantomData;
 
-use mlua::{UserData, UserDataMethods, Value};
+use mlua::{UserData, UserDataFields, UserDataMethods, Value};
+
+use crate::lua;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Color<Space = Linear, Alpha = Normal> {
@@ -97,6 +99,49 @@ impl Color {
             a: self.a,
             _space: PhantomData,
             _alpha: PhantomData,
+        }
+    }
+
+    pub fn to_oklch(self) -> Oklch {
+        const LMS_L_R: f64 = 0.4122214708;
+        const LMS_L_G: f64 = 0.5363325363;
+        const LMS_L_B: f64 = 0.0514459929;
+        const LMS_M_R: f64 = 0.2119034982;
+        const LMS_M_G: f64 = 0.6806995451;
+        const LMS_M_B: f64 = 0.1073969566;
+        const LMS_S_R: f64 = 0.0883024619;
+        const LMS_S_G: f64 = 0.2817188376;
+        const LMS_S_B: f64 = 0.6299787005;
+        const OKLAB_L_L: f64 = 0.2104542553;
+        const OKLAB_L_M: f64 = 0.7936177850;
+        const OKLAB_L_S: f64 = -0.0040720468;
+        const OKLAB_A_L: f64 = 1.9779984951;
+        const OKLAB_A_M: f64 = -2.4285922050;
+        const OKLAB_A_S: f64 = 0.4505937099;
+        const OKLAB_B_L: f64 = 0.0259040371;
+        const OKLAB_B_M: f64 = 0.7827717662;
+        const OKLAB_B_S: f64 = -0.8086757660;
+
+        let l = LMS_L_R as f32 * self.r + LMS_L_G as f32 * self.g + LMS_L_B as f32 * self.b;
+        let m = LMS_M_R as f32 * self.r + LMS_M_G as f32 * self.g + LMS_M_B as f32 * self.b;
+        let s = LMS_S_R as f32 * self.r + LMS_S_G as f32 * self.g + LMS_S_B as f32 * self.b;
+
+        let l = l.cbrt();
+        let m = m.cbrt();
+        let s = s.cbrt();
+
+        let lightness = OKLAB_L_L as f32 * l + OKLAB_L_M as f32 * m + OKLAB_L_S as f32 * s;
+        let a = OKLAB_A_L as f32 * l + OKLAB_A_M as f32 * m + OKLAB_A_S as f32 * s;
+        let b = OKLAB_B_L as f32 * l + OKLAB_B_M as f32 * m + OKLAB_B_S as f32 * s;
+
+        let chroma = (a * a + b * b).sqrt();
+        let hue = b.atan2(a) * 180.0 / std::f32::consts::PI;
+
+        Oklch {
+            l: lightness,
+            c: chroma,
+            h: if hue < 0.0 { hue + 360.0 } else { hue },
+            a: self.a,
         }
     }
 }
@@ -218,6 +263,10 @@ impl UserData for Color {
                 Ok(this.with_luma(luma))
             },
         );
+
+        methods.add_method("to_oklch", |_lua, this, _args: ()| -> mlua::Result<Oklch> {
+            Ok(this.to_oklch())
+        });
     }
 }
 
@@ -331,6 +380,82 @@ impl Buffer {
             self.b[i] = b;
             self.a[i] = a;
         }
+    }
+}
+
+pub struct Oklch {
+    pub l: f32,
+    pub c: f32,
+    pub h: f32,
+    pub a: f32,
+}
+
+impl Oklch {
+    pub fn to_linear_rgb(&self) -> Color {
+        const LMS_L_A: f64 = 0.3963377774;
+        const LMS_L_B: f64 = 0.2158037573;
+        const LMS_M_A: f64 = -0.1055613458;
+        const LMS_M_B: f64 = -0.0638541728;
+        const LMS_S_A: f64 = -0.0894841775;
+        const LMS_S_B: f64 = -1.2914855480;
+        const RGB_R_L: f64 = 4.0767416621;
+        const RGB_R_M: f64 = -3.3077115913;
+        const RGB_R_S: f64 = 0.2309699292;
+        const RGB_G_L: f64 = -1.2684380046;
+        const RGB_G_M: f64 = 2.6097574011;
+        const RGB_G_S: f64 = -0.3413193965;
+        const RGB_B_L: f64 = -0.0041960863;
+        const RGB_B_M: f64 = -0.7034186147;
+        const RGB_B_S: f64 = 1.7076147010;
+
+        let hue = self.h * std::f32::consts::PI / 180.0;
+        let a = self.c * hue.cos();
+        let b = self.c * hue.sin();
+
+        let l = self.l + LMS_L_A as f32 * a + LMS_L_B as f32 * b;
+        let m = self.l + LMS_M_A as f32 * a + LMS_M_B as f32 * b;
+        let s = self.l + LMS_S_A as f32 * a + LMS_S_B as f32 * b;
+
+        let l = l * l * l;
+        let m = m * m * m;
+        let s = s * s * s;
+
+        Color {
+            r: RGB_R_L as f32 * l + RGB_R_M as f32 * m + RGB_R_S as f32 * s,
+            g: RGB_G_L as f32 * l + RGB_G_M as f32 * m + RGB_G_S as f32 * s,
+            b: RGB_B_L as f32 * l + RGB_B_M as f32 * m + RGB_B_S as f32 * s,
+            a: self.a,
+            _space: PhantomData,
+            _alpha: PhantomData,
+        }
+    }
+}
+
+impl UserData for Oklch {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_meta_field("__name", "Oklch");
+
+        fields.add_field_method_get("l", |_lua, this| -> mlua::Result<f32> { Ok(this.l) });
+        fields.add_field_method_get("c", |_lua, this| -> mlua::Result<f32> { Ok(this.c) });
+        fields.add_field_method_get("h", |_lua, this| -> mlua::Result<f32> { Ok(this.h) });
+        fields.add_field_method_get("a", |_lua, this| -> mlua::Result<f32> { Ok(this.a) });
+
+        fields.add_field_method_set("l", |_lua, this, value: Value| -> mlua::Result<()> {
+            this.l = lua::number("set", "l", Some(value))?;
+            Ok(())
+        });
+        fields.add_field_method_set("c", |_lua, this, value: Value| -> mlua::Result<()> {
+            this.c = lua::number("set", "c", Some(value))?;
+            Ok(())
+        });
+        fields.add_field_method_set("h", |_lua, this, value: Value| -> mlua::Result<()> {
+            this.h = lua::number("set", "h", Some(value))?;
+            Ok(())
+        });
+        fields.add_field_method_set("a", |_lua, this, value: Value| -> mlua::Result<()> {
+            this.a = lua::number("set", "a", Some(value))?;
+            Ok(())
+        });
     }
 }
 
@@ -674,5 +799,107 @@ mod with_luma {
             .unwrap_err()
             .to_string();
         assert!(error.contains("with_luma: 'luma' must be finite"));
+    }
+}
+
+#[cfg(test)]
+mod oklch {
+    use super::{Color, Oklch};
+
+    #[test]
+    fn the_oklch_to_linear_rgb_matches_the_oklab_reference() {
+        let color = Oklch {
+            l: 0.7,
+            c: 0.15,
+            h: 260.0,
+            a: 1.0,
+        }
+        .to_linear_rgb();
+
+        assert!((color.r - 0.1300774).abs() < 1e-5);
+        assert!((color.g - 0.3385161).abs() < 1e-5);
+        assert!((color.b - 0.9611975).abs() < 1e-5);
+        assert_eq!(color.a, 1.0);
+        assert_eq!(color.to_srgb().to_rgba8(), [101, 157, 251, 255]);
+    }
+
+    #[test]
+    fn the_oklch_neutral_gives_the_gray_of_its_lightness() {
+        let color = Oklch {
+            l: 0.5,
+            c: 0.0,
+            h: 0.0,
+            a: 1.0,
+        }
+        .to_linear_rgb();
+
+        assert!((color.r - 0.125).abs() < 1e-5);
+        assert_eq!(color.to_srgb().to_rgba8(), [99, 99, 99, 255]);
+    }
+
+    #[test]
+    fn the_oklch_allows_out_of_gamut_channels() {
+        let color = Oklch {
+            l: 0.5,
+            c: 0.5,
+            h: 260.0,
+            a: 1.0,
+        }
+        .to_linear_rgb();
+
+        assert!((color.r - 0.0120694).abs() < 1e-5);
+        assert!((color.g + 0.1571394).abs() < 1e-5);
+        assert!((color.b - 2.4433003).abs() < 1e-5);
+        assert_eq!(color.a, 1.0);
+    }
+
+    #[test]
+    fn the_oklch_keeps_the_alpha() {
+        let color = Oklch {
+            l: 0.9,
+            c: 0.05,
+            h: 100.0,
+            a: 0.5,
+        }
+        .to_linear_rgb();
+
+        assert!((color.r - 0.7857574).abs() < 1e-5);
+        assert_eq!(color.a, 0.5);
+    }
+
+    #[test]
+    fn the_color_to_oklch_matches_the_oklab_reference() {
+        let oklch = Color::from_rgba([0.3, 0.15, 0.45, 0.75])
+            .demultiply()
+            .to_oklch();
+
+        assert!((oklch.l - 0.6606662).abs() < 1e-5);
+        assert!((oklch.c - 0.1248309).abs() < 1e-5);
+        assert!((oklch.h - 309.8361).abs() < 1e-3);
+        assert_eq!(oklch.a, 0.75);
+    }
+
+    #[test]
+    fn the_oklch_and_color_conversions_are_inverses() {
+        let oklch = Oklch {
+            l: 0.7,
+            c: 0.15,
+            h: 260.0,
+            a: 0.9,
+        };
+        let round = oklch.to_linear_rgb().to_oklch();
+
+        assert!((round.l - oklch.l).abs() < 1e-5);
+        assert!((round.c - oklch.c).abs() < 1e-5);
+        assert!((round.h - oklch.h).abs() < 1e-3);
+        assert_eq!(round.a, oklch.a);
+
+        let color = Color::from_rgba([0.4, 0.2, 0.6, 1.0]).demultiply();
+        let round = color.to_oklch().to_linear_rgb();
+
+        assert!((round.r - color.r).abs() < 1e-5);
+        assert!((round.g - color.g).abs() < 1e-5);
+        assert!((round.b - color.b).abs() < 1e-5);
+        assert_eq!(round.a, color.a);
     }
 }
