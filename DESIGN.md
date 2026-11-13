@@ -97,7 +97,7 @@ change is a script edit; an op-behavior change is an engine edit.
 | `fill` | `img:fill(region, color)` | Paint `region` (a `Rectangle`, `Text`, or `Path`) with `color` (a `Color`, an `Oklch`, or a hex string). The space is chosen by the region's kind: a `Text` region composites in sRGB, a `Rectangle` or `Path` region in linear. In place. |
 | `luma_in` | `img:luma_in(region) → number` | Mean luma of `region` (a `Rectangle`), 0–255 (see *Luma*). |
 | `dominant_in` | `img:dominant_in(region) → Color` | The dominant color of `region` (a `Rectangle`): the demultiplied linear channels, clamped to 0–1, quantized to 4 bits, the most-populated bucket weighted by alpha, returned as that bucket's alpha-weighted mean. An empty or fully transparent region is transparent. |
-| `pixel` | `img:pixel(x, y) → Color` | The pixel at `(x, y)` (logical px) as a `Color` (its channels read back in sRGB, 0–255, § Color fields); outside the image, transparent. |
+| `pixel` | `img:pixel(x, y) → Pixel` | The pixel at `(x, y)` (logical px) as a `Pixel` (sRGB, 0–255, § Pixel); nil outside the image. |
 | `width` | `img.width → number` | The image's width in logical px. |
 | `height` | `img.height → number` | The image's height in logical px. |
 | `physical_width` | `img.physical_width → number` | The image's width in physical px (the run scale). |
@@ -127,11 +127,15 @@ change is a script edit; an op-behavior change is an engine edit.
 | `with_luma` | `color:with_luma(luma) → Color` | A new `Color` whose luma (see *Luma*) is `luma` (0–1): the linear channels scale proportionally (the hue is preserved) and clamp — a target the hue can't carry falls short, and black stays black. |
 | `to_oklch` | `color:to_oklch() → Oklch` | The color in Oklch (see *Oklch*): lightness, chroma, hue in degrees, alpha. The inverse of the `Oklch` transform that `fill` applies. |
 
-### Color fields
+### Pixel
+
+A `Pixel` is the image's 8-bit boundary form: the four sRGB channels
+(0–255) — the stored linear value through the sRGB encode (the
+boundary's single rounding).
 
 | op | signature | meaning |
 |---|---|---|
-| `r`, `g`, `b`, `a` | `color.r → number` | The channels in sRGB (0–255): the stored linear value through the sRGB encode (the boundary's single rounding) — `img:pixel(x, y).r` is the `r` of that pixel. |
+| `r`, `g`, `b`, `a` | `pixel.r → number` | A channel of the `Pixel` (0–255) — `img:pixel(x, y).r` is the `r` of that pixel. |
 
 ### Output
 

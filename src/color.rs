@@ -35,15 +35,19 @@ impl<S, N> Color<S, N> {
 }
 
 impl Color<Srgb> {
-    pub const fn from_rgba8(pixel: [u8; 4]) -> Self {
+    pub const fn from_pixel(pixel: Pixel) -> Self {
         Self {
-            r: pixel[0] as f32 / 255.0,
-            g: pixel[1] as f32 / 255.0,
-            b: pixel[2] as f32 / 255.0,
-            a: pixel[3] as f32 / 255.0,
+            r: pixel.r as f32 / 255.0,
+            g: pixel.g as f32 / 255.0,
+            b: pixel.b as f32 / 255.0,
+            a: pixel.a as f32 / 255.0,
             _space: PhantomData,
             _alpha: PhantomData,
         }
+    }
+
+    pub const fn from_rgba8(rgba: [u8; 4]) -> Self {
+        Self::from_pixel(Pixel::from_rgba8(rgba))
     }
 
     pub fn to_linear(self) -> Color<Linear> {
@@ -57,13 +61,17 @@ impl Color<Srgb> {
         }
     }
 
+    pub const fn to_pixel(self) -> Pixel {
+        Pixel {
+            r: encode_u8(self.r),
+            g: encode_u8(self.g),
+            b: encode_u8(self.b),
+            a: encode_u8(self.a),
+        }
+    }
+
     pub const fn to_rgba8(self) -> [u8; 4] {
-        [
-            encode_u8(self.r),
-            encode_u8(self.g),
-            encode_u8(self.b),
-            encode_u8(self.a),
-        ]
+        self.to_pixel().to_rgba8()
     }
 }
 
@@ -240,21 +248,6 @@ impl Color<Linear, Premultiplied> {
 }
 
 impl UserData for Color {
-    fn add_fields<F: UserDataFields<Color>>(fields: &mut F) {
-        fields.add_field_method_get("r", |_lua, this| -> mlua::Result<u8> {
-            Ok(this.to_srgb().to_rgba8()[0])
-        });
-        fields.add_field_method_get("g", |_lua, this| -> mlua::Result<u8> {
-            Ok(this.to_srgb().to_rgba8()[1])
-        });
-        fields.add_field_method_get("b", |_lua, this| -> mlua::Result<u8> {
-            Ok(this.to_srgb().to_rgba8()[2])
-        });
-        fields.add_field_method_get("a", |_lua, this| -> mlua::Result<u8> {
-            Ok(this.to_srgb().to_rgba8()[3])
-        });
-    }
-
     fn add_methods<M: UserDataMethods<Color>>(methods: &mut M) {
         methods.add_method(
             "with_luma",
@@ -398,6 +391,36 @@ impl Buffer {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pixel {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+    pub a: u8,
+}
+
+impl Pixel {
+    pub const fn from_rgba8([r, g, b, a]: [u8; 4]) -> Self {
+        Self { r, g, b, a }
+    }
+
+    pub const fn to_rgba8(self) -> [u8; 4] {
+        [self.r, self.g, self.b, self.a]
+    }
+}
+
+impl UserData for Pixel {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_meta_field("__name", "Pixel");
+
+        fields.add_field_method_get("r", |_lua, this| -> mlua::Result<u8> { Ok(this.r) });
+        fields.add_field_method_get("g", |_lua, this| -> mlua::Result<u8> { Ok(this.g) });
+        fields.add_field_method_get("b", |_lua, this| -> mlua::Result<u8> { Ok(this.b) });
+        fields.add_field_method_get("a", |_lua, this| -> mlua::Result<u8> { Ok(this.a) });
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Oklch {
     pub l: f32,
     pub c: f32,
@@ -406,7 +429,7 @@ pub struct Oklch {
 }
 
 impl Oklch {
-    pub fn to_linear_rgb(&self) -> Color {
+    pub fn to_linear_rgb(self) -> Color {
         const LMS_L_A: f64 = 0.3963377774;
         const LMS_L_B: f64 = 0.2158037573;
         const LMS_M_A: f64 = -0.1055613458;

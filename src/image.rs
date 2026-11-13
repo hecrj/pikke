@@ -438,19 +438,22 @@ impl Image {
         Ok(())
     }
 
-    pub fn pixel(&self, x: f32, y: f32) -> Result<Color> {
+    pub fn pixel(&self, x: f32, y: f32) -> Result<Option<color::Pixel>> {
         let scale = self.viewport.scale();
         let left = scale.to_physical_signed(x)?;
         let top = scale.to_physical_signed(y)?;
 
         if left < 0 || top < 0 || left >= self.width() as i32 || top >= self.height() as i32 {
-            return Ok(Color::TRANSPARENT);
+            return Ok(None);
         }
 
-        Ok(self
-            .buffer
-            .at((top * self.width() as i32 + left) as usize)
-            .demultiply())
+        Ok(Some(
+            self.buffer
+                .at((top * self.width() as i32 + left) as usize)
+                .demultiply()
+                .to_srgb()
+                .to_pixel(),
+        ))
     }
 
     pub fn luma_in(&self, region: Rectangle) -> Result<f32> {
@@ -677,7 +680,7 @@ impl Reference {
         self.evaluate(|image| image.luma_in(region))
     }
 
-    fn pixel(&self, x: f32, y: f32) -> Result<Color> {
+    fn pixel(&self, x: f32, y: f32) -> Result<Option<color::Pixel>> {
         self.evaluate(|image| image.pixel(x, y))
     }
 
@@ -1056,7 +1059,9 @@ impl UserData for Reference {
 
         methods.add_method(
             "pixel",
-            |_lua, this, (x, y): (f32, f32)| -> mlua::Result<Color> { Ok(this.pixel(x, y)?) },
+            |_lua, this, (x, y): (f32, f32)| -> mlua::Result<Option<color::Pixel>> {
+                Ok(this.pixel(x, y)?)
+            },
         );
     }
 }

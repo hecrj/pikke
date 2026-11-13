@@ -12,8 +12,8 @@ assert(pixel.b == 0, pixel.b)
 assert(pixel.a == 255, pixel.a)
 
 assert(image:pixel(9, 9).r == 255, "the corner keeps the fill")
-assert(image:pixel(-1, 0).a == 0, "outside the image is transparent")
-assert(image:pixel(10, 0).a == 0, "outside the image is transparent")
+assert(image:pixel(-1, 0) == nil, "outside the image is nil")
+assert(image:pixel(10, 0) == nil, "outside the image is nil")
 
 assert(blank({ width = 4, height = 4 }):pixel(0, 0).a == 0, "an absent color is transparent")
 
