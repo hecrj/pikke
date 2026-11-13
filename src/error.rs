@@ -41,6 +41,13 @@ pub enum Error {
         script: PathBuf,
         error: Arc<io::Error>,
     },
+    #[error("failed to load {path}: {error}")]
+    FontReadFailed {
+        path: PathBuf,
+        error: Arc<io::Error>,
+    },
+    #[error("{path} is not a valid font")]
+    FontInvalid { path: PathBuf },
     #[error("script {script}: the module must be a table ({error})")]
     ModuleNotTable {
         script: PathBuf,

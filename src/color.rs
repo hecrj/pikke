@@ -240,6 +240,21 @@ impl Color<Linear, Premultiplied> {
 }
 
 impl UserData for Color {
+    fn add_fields<F: UserDataFields<Color>>(fields: &mut F) {
+        fields.add_field_method_get("r", |_lua, this| -> mlua::Result<u8> {
+            Ok(this.to_srgb().to_rgba8()[0])
+        });
+        fields.add_field_method_get("g", |_lua, this| -> mlua::Result<u8> {
+            Ok(this.to_srgb().to_rgba8()[1])
+        });
+        fields.add_field_method_get("b", |_lua, this| -> mlua::Result<u8> {
+            Ok(this.to_srgb().to_rgba8()[2])
+        });
+        fields.add_field_method_get("a", |_lua, this| -> mlua::Result<u8> {
+            Ok(this.to_srgb().to_rgba8()[3])
+        });
+    }
+
     fn add_methods<M: UserDataMethods<Color>>(methods: &mut M) {
         methods.add_method(
             "with_luma",
@@ -747,58 +762,6 @@ mod with_luma {
 
         assert_eq!(white.with_luma(-1.0).r, 0.0);
         assert_eq!(white.with_luma(2.0), white);
-    }
-
-    #[test]
-    fn the_with_luma_binding_scales_a_color() {
-        let lua = mlua::Lua::new();
-        let color = lua
-            .create_userdata(Color::from_rgba8([128, 128, 128, 255]).to_linear())
-            .unwrap();
-
-        let env = lua.create_table().unwrap();
-        env.set("color", color).unwrap();
-
-        let result: mlua::AnyUserData = lua
-            .load("color:with_luma(0.0)")
-            .set_environment(env.clone())
-            .eval()
-            .unwrap();
-        let result = *result.borrow::<Color>().unwrap();
-        assert_eq!(result.to_srgb().to_rgba8(), [0, 0, 0, 255]);
-
-        let result: mlua::AnyUserData = lua
-            .load("color:with_luma(1.0)")
-            .set_environment(env.clone())
-            .eval()
-            .unwrap();
-        let result = *result.borrow::<Color>().unwrap();
-        assert_eq!(result.to_srgb().to_rgba8(), [255, 255, 255, 255]);
-
-        let result: mlua::AnyUserData = lua
-            .load("color:with_luma(0.215744)")
-            .set_environment(env.clone())
-            .eval()
-            .unwrap();
-        let result = *result.borrow::<Color>().unwrap();
-        assert_eq!(result.to_srgb().to_rgba8(), [128, 128, 128, 255]);
-
-        let error = lua
-            .load("color:with_luma('x')")
-            .set_environment(env.clone())
-            .eval::<()>()
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("with_luma: 'luma' is not a number"));
-
-        env.set("huge", f64::INFINITY).unwrap();
-        let error = lua
-            .load("color:with_luma(huge)")
-            .set_environment(env)
-            .eval::<()>()
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("with_luma: 'luma' must be finite"));
     }
 }
 

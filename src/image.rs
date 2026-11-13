@@ -438,6 +438,21 @@ impl Image {
         Ok(())
     }
 
+    pub fn pixel(&self, x: f32, y: f32) -> Result<Color> {
+        let scale = self.viewport.scale();
+        let left = scale.to_physical_signed(x)?;
+        let top = scale.to_physical_signed(y)?;
+
+        if left < 0 || top < 0 || left >= self.width() as i32 || top >= self.height() as i32 {
+            return Ok(Color::TRANSPARENT);
+        }
+
+        Ok(self
+            .buffer
+            .at((top * self.width() as i32 + left) as usize)
+            .demultiply())
+    }
+
     pub fn luma_in(&self, region: Rectangle) -> Result<f32> {
         let scale = self.viewport.scale();
         let left = scale.to_physical_signed(region.x)?;
@@ -660,6 +675,10 @@ impl Reference {
 
     fn luma_in(&self, region: Rectangle) -> Result<f32> {
         self.evaluate(|image| image.luma_in(region))
+    }
+
+    fn pixel(&self, x: f32, y: f32) -> Result<Color> {
+        self.evaluate(|image| image.pixel(x, y))
     }
 
     fn dominant_in(&self, region: Rectangle) -> Result<Color> {
@@ -1034,6 +1053,11 @@ impl UserData for Reference {
                 Ok(this.dominant_in(region)?)
             },
         );
+
+        methods.add_method(
+            "pixel",
+            |_lua, this, (x, y): (f32, f32)| -> mlua::Result<Color> { Ok(this.pixel(x, y)?) },
+        );
     }
 }
 
@@ -1086,9 +1110,7 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
 
-    use mlua::{AnyUserData, Function, Lua, Table};
-
-    use super::{Dimension, Image, Mode, Reference, install};
+    use super::{Dimension, Image, Mode, Reference};
     use crate::color;
     use crate::text::Text;
     use crate::{Color, Rectangle, Result, Scale, Viewport};
@@ -1136,70 +1158,6 @@ mod tests {
             (image.logical_width(), image.logical_height()),
             (300.0, 100.0)
         );
-
-        Ok(())
-    }
-
-    fn installed_blank(scale: Scale) -> (Lua, Function) {
-        let lua = Lua::new();
-        let env = lua.create_table().unwrap();
-        install(&lua, &env, scale).unwrap();
-        let blank: Function = env.get("blank").unwrap();
-        (lua, blank)
-    }
-
-    #[test]
-    fn the_blank_binding_paints_and_validates_its_arguments() -> Result<()> {
-        let (lua, blank) = installed_blank(Scale::default());
-
-        let opts = lua.create_table().unwrap();
-        opts.set("width", 4).unwrap();
-        opts.set("height", 2).unwrap();
-        opts.set("color", "#C81E3C").unwrap();
-        let userdata: AnyUserData = blank.call(opts).unwrap();
-        let image = userdata.borrow::<Reference>().unwrap().image().unwrap();
-        assert_eq!((image.width(), image.height()), (4, 2));
-        for pixel in image.to_rgba8().chunks(4) {
-            assert_eq!(pixel, &[200, 30, 60, 255]);
-        }
-
-        let opts = lua.create_table().unwrap();
-        opts.set("width", 4).unwrap();
-        opts.set("height", 2).unwrap();
-        let userdata: AnyUserData = blank.call(opts).unwrap();
-        let image = userdata.borrow::<Reference>().unwrap().image().unwrap();
-        assert_eq!((image.width(), image.height()), (4, 2));
-        assert!(image.to_rgba8().iter().all(|&byte| byte == 0));
-
-        let error = |opts: Table| blank.call::<AnyUserData>(opts).unwrap_err().to_string();
-
-        let opts = lua.create_table().unwrap();
-        opts.set("height", 2).unwrap();
-        opts.set("color", "#C81E3C").unwrap();
-        assert!(error(opts).contains("blank: needs 'width'"));
-
-        let opts = lua.create_table().unwrap();
-        opts.set("width", 4).unwrap();
-        opts.set("color", "#C81E3C").unwrap();
-        assert!(error(opts).contains("blank: needs 'height'"));
-
-        let opts = lua.create_table().unwrap();
-        opts.set("width", 0.0).unwrap();
-        opts.set("height", 2).unwrap();
-        opts.set("color", "#C81E3C").unwrap();
-        assert!(error(opts).contains("blank: 'width' must be a positive number"));
-
-        let opts = lua.create_table().unwrap();
-        opts.set("width", 4).unwrap();
-        opts.set("height", -2).unwrap();
-        opts.set("color", "#C81E3C").unwrap();
-        assert!(error(opts).contains("blank: 'height' must be a positive number"));
-
-        let opts = lua.create_table().unwrap();
-        opts.set("width", 4).unwrap();
-        opts.set("height", 2).unwrap();
-        opts.set("color", "C81E3C").unwrap();
-        assert!(error(opts).contains("not a #RRGGBB hex color"));
 
         Ok(())
     }
@@ -1910,191 +1868,13 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn the_fill_binding_validates_its_arguments() -> Result<()> {
-        let lua = Lua::new();
-        let image = Image::new(Scale::default(), 4.0, 4.0, Color::TRANSPARENT)?;
-        let output = lua.create_userdata(Reference::new(image)).unwrap();
-        let region = lua
-            .create_userdata(Rectangle::new(0.0, 0.0, 2.0, 2.0))
-            .unwrap();
-        let text = lua
-            .create_userdata(Text::new(
-                Scale::default(),
-                "Any Family",
-                100.0,
-                400.0,
-                0.0,
-                0.0,
-                "",
-            )?)
-            .unwrap();
-
-        let env = lua.create_table().unwrap();
-        env.set("output", output.clone()).unwrap();
-        env.set("region", region.clone()).unwrap();
-        env.set("text", text.clone()).unwrap();
-
-        for color in ["808080", "#12345", "#GGGGGG", "#1234567"] {
-            let error = lua
-                .load(format!("output:fill(region, \"{color}\")"))
-                .set_environment(env.clone())
-                .eval::<()>()
-                .unwrap_err();
-            assert!(error.to_string().contains("not a #RRGGBB hex color"));
-        }
-
-        for color in ["42", "{}"] {
-            let error = lua
-                .load(format!("output:fill(region, {color})"))
-                .set_environment(env.clone())
-                .eval::<()>()
-                .unwrap_err();
-            assert!(
-                error
-                    .to_string()
-                    .contains("the color must be a `Color`, an `Oklch`, or a hex string")
-            );
-        }
-
-        let error = lua
-            .load("output:fill(output, \"#000000\")")
-            .set_environment(env.clone())
-            .eval::<()>()
-            .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("the region must be a `Rectangle`, a `Text`, or a `Path`")
-        );
-
-        lua.load("output:fill(text, \"#000000\")")
-            .set_environment(env.clone())
-            .eval::<()>()
-            .unwrap();
-
-        lua.load("output:fill(region, \"#FF0000\")")
-            .set_environment(env)
-            .eval::<()>()
-            .unwrap();
-        let painted = output.borrow::<Reference>().unwrap().image().unwrap();
-        assert!(painted.buffer.at(5).r > 0.0);
-        assert_eq!(painted.buffer.at(5).a, 1.0);
-
-        Ok(())
-    }
-
-    #[test]
-    fn the_fill_accepts_an_oklch() -> Result<()> {
-        let lua = Lua::new();
-        let image = Image::new(Scale::default(), 4.0, 4.0, Color::TRANSPARENT)?;
-        let output = lua.create_userdata(Reference::new(image)).unwrap();
-        let region = lua
-            .create_userdata(Rectangle::new(0.0, 0.0, 4.0, 4.0))
-            .unwrap();
-        let oklch = lua
-            .create_userdata(color::Oklch {
-                l: 0.7,
-                c: 0.15,
-                h: 260.0,
-                a: 1.0,
-            })
-            .unwrap();
-
-        let env = lua.create_table().unwrap();
-        env.set("output", output.clone()).unwrap();
-        env.set("region", region.clone()).unwrap();
-        env.set("oklch", oklch).unwrap();
-
-        lua.load("output:fill(region, oklch)")
-            .set_environment(env)
-            .eval::<()>()
-            .unwrap();
-
-        let painted = output.borrow::<Reference>().unwrap().image().unwrap();
-        assert_eq!(painted.to_rgba8(), [101, 157, 251, 255].repeat(16));
-
-        Ok(())
-    }
-
-    #[test]
-    fn the_dominant_in_feeds_the_fill_as_a_color() -> Result<()> {
-        let lua = Lua::new();
-        let source = Image::new(
-            Scale::default(),
-            4.0,
-            4.0,
-            Color::from_rgba8([200, 30, 60, 255]).to_linear(),
-        )?;
-        let source = lua.create_userdata(Reference::new(source)).unwrap();
-        let target = Image::new(Scale::default(), 4.0, 4.0, Color::TRANSPARENT)?;
-        let target = lua.create_userdata(Reference::new(target)).unwrap();
-        let region = lua
-            .create_userdata(Rectangle::new(0.0, 0.0, 4.0, 4.0))
-            .unwrap();
-
-        let env = lua.create_table().unwrap();
-        env.set("source", source).unwrap();
-        env.set("target", target.clone()).unwrap();
-        env.set("region", region).unwrap();
-
-        lua.load("local color = source:dominant_in(region)\ntarget:fill(region, color)")
-            .set_environment(env)
-            .eval::<()>()
-            .unwrap();
-
-        let painted = target.borrow::<Reference>().unwrap().image().unwrap();
-        assert_eq!(painted.to_rgba8(), [200, 30, 60, 255].repeat(16));
-
-        Ok(())
-    }
-
-    #[test]
-    fn the_dominant_in_clamps_out_of_gamut_channels() -> Result<()> {
-        let lua = Lua::new();
-        let image = Image::new(Scale::default(), 4.0, 4.0, Color::TRANSPARENT)?;
-        let output = lua.create_userdata(Reference::new(image)).unwrap();
-        let region = lua
-            .create_userdata(Rectangle::new(0.0, 0.0, 4.0, 4.0))
-            .unwrap();
-        let oklch = lua
-            .create_userdata(color::Oklch {
-                l: 0.5,
-                c: 0.5,
-                h: 260.0,
-                a: 1.0,
-            })
-            .unwrap();
-
-        let env = lua.create_table().unwrap();
-        env.set("output", output.clone()).unwrap();
-        env.set("region", region.clone()).unwrap();
-        env.set("oklch", oklch).unwrap();
-
-        lua.load("output:fill(region, oklch)\ndominant = output:dominant_in(region)")
-            .set_environment(env.clone())
-            .eval::<()>()
-            .unwrap();
-
-        let dominant: AnyUserData = env.get("dominant").unwrap();
-        let color = dominant.borrow::<Color>().unwrap();
-        assert!((color.r - 0.0120694).abs() < 1e-5);
-        assert_eq!(color.g, 0.0);
-        assert_eq!(color.b, 1.0);
-        assert_eq!(color.a, 1.0);
-
-        Ok(())
-    }
-
     fn register_vendored_font() {
-        let lua = Lua::new();
-        let env = lua.create_table().unwrap();
-        crate::font::install(&lua, &env).unwrap();
-        lua.load("font('NotoSans-Regular.ttf')")
-            .set_name("fonts/face.lua")
-            .set_environment(env)
-            .call::<()>(())
-            .unwrap();
+        crate::font::Font::load(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("fonts/NotoSans-Regular.ttf")
+                .as_path(),
+        )
+        .unwrap();
     }
 
     #[test]

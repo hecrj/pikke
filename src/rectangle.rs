@@ -160,58 +160,7 @@ pub fn install(lua: &Lua, env: &Table) -> crate::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Padding, Rectangle, install};
-    use mlua::{AnyUserData, Function, Lua, ObjectLike, Table, Value};
-
-    #[test]
-    fn the_op_reads_its_real_px_geometry() {
-        let lua = Lua::new();
-        let env = lua.create_table().unwrap();
-        install(&lua, &env).unwrap();
-        let rectangle: Function = env.get("rectangle").unwrap();
-
-        let call_rect = |opts: Table| -> Rectangle {
-            let userdata: AnyUserData = rectangle.call(opts).unwrap();
-            *userdata.borrow::<Rectangle>().unwrap()
-        };
-
-        let opts = lua.create_table().unwrap();
-        opts.set("size", 100.5).unwrap();
-        let rect = call_rect(opts);
-        assert_eq!(
-            (rect.x, rect.y, rect.width, rect.height),
-            (0.0, 0.0, 100.5, 100.5)
-        );
-
-        let opts = lua.create_table().unwrap();
-        opts.set("size", 100).unwrap();
-        let rect = call_rect(opts);
-        assert_eq!(
-            (rect.x, rect.y, rect.width, rect.height),
-            (0.0, 0.0, 100.0, 100.0)
-        );
-
-        let opts = lua.create_table().unwrap();
-        opts.set("x", 10.5).unwrap();
-        opts.set("y", -10.5).unwrap();
-        let size = lua.create_table().unwrap();
-        size.set(1, 100.5).unwrap();
-        size.set(2, 50.5).unwrap();
-        opts.set("size", size).unwrap();
-        let rect = call_rect(opts);
-        assert_eq!(
-            (rect.x, rect.y, rect.width, rect.height),
-            (10.5, -10.5, 100.5, 50.5)
-        );
-
-        let opts = lua.create_table().unwrap();
-        assert!(rectangle.call::<AnyUserData>(opts).is_err());
-        let size = lua.create_table().unwrap();
-        size.set(1, 100.0).unwrap();
-        let opts = lua.create_table().unwrap();
-        opts.set("size", size).unwrap();
-        assert!(rectangle.call::<AnyUserData>(opts).is_err());
-    }
+    use super::{Padding, Rectangle};
 
     #[test]
     fn padded_grows_all_sides() {
@@ -233,49 +182,5 @@ mod tests {
             (padded.x, padded.y, padded.width, padded.height),
             (20.0, 30.0, 80.0, 30.0)
         );
-    }
-
-    #[test]
-    fn padded_supports_its_variants() {
-        let lua = Lua::new();
-        let env = lua.create_table().unwrap();
-        install(&lua, &env).unwrap();
-        let rectangle: Function = env.get("rectangle").unwrap();
-
-        let opts = lua.create_table().unwrap();
-        opts.set("x", 10.0).unwrap();
-        opts.set("y", 20.0).unwrap();
-        let size = lua.create_table().unwrap();
-        size.set(1, 100.0).unwrap();
-        size.set(2, 50.0).unwrap();
-        opts.set("size", size).unwrap();
-        let rect: AnyUserData = rectangle.call(opts).unwrap();
-
-        let call_padded = |value: Value| -> (f32, f32, f32, f32) {
-            let padded: AnyUserData = rect.call_method("padded", (value,)).unwrap();
-            let padded = *padded.borrow::<Rectangle>().unwrap();
-            (padded.x, padded.y, padded.width, padded.height)
-        };
-
-        assert_eq!(call_padded(Value::Integer(10)), (0.0, 10.0, 120.0, 70.0));
-
-        let pair = lua.create_table().unwrap();
-        pair.set(1, 10.0).unwrap();
-        pair.set(2, 5.0).unwrap();
-        assert_eq!(call_padded(Value::Table(pair)), (5.0, 10.0, 110.0, 70.0));
-
-        let sides = lua.create_table().unwrap();
-        sides.set("left", 1.0).unwrap();
-        sides.set("top", 2.0).unwrap();
-        sides.set("right", 3.0).unwrap();
-        sides.set("bottom", 4.0).unwrap();
-        assert_eq!(call_padded(Value::Table(sides)), (9.0, 18.0, 104.0, 56.0));
-
-        let one = lua.create_table().unwrap();
-        one.set(1, 10.0).unwrap();
-        assert!(rect.call_method::<AnyUserData>("padded", (one,)).is_err());
-
-        let empty = lua.create_table().unwrap();
-        assert!(rect.call_method::<AnyUserData>("padded", (empty,)).is_err());
     }
 }

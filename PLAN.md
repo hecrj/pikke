@@ -539,6 +539,25 @@ question for engine outputs.
   libfreetype.
 - **v1's designs are stills-only,** so the MP4 path is exercised
   synthetically; a real animated run is v2.
+- **Engine tests behind the Lua boundary (deferred).** `tests/lua`
+  exercises the engine through the op surface at scale 1 — a script
+  can assert on its own pixels (`img:pixel`) and errors, so most of
+  the old Rust unit tests moved into scripts unchanged in meaning.
+  The cases only a Rust harness can observe are parked here,
+  restorable later: the load-time errors and `Engine::arguments()`
+  (a script can't watch its own load fail); the logical-px reports
+  at a scale ≠ 1 (the harness's 1.0 makes logical and physical
+  coincide — `text`'s bounds/width, the stream's 0.5-scale frames);
+  an unregistered font family (`Font` is only born registered, so
+  the degenerate case is unreachable from a script); the MP4's
+  packet count and the written PNG's bytes (the encoders are pinned
+  at their seams; the frame's pixels are pinned in-script through
+  `pixel`); an out-of-gamut `Oklch` fed to `fill` (no `oklch`
+  constructor op — the conversion is pinned in the color unit); the
+  `path` op's segment storage (no element accessor; its point-table
+  parse is internal). Scripts locate their own directory from
+  `package.path` (`debug` is withheld from the standard-library
+  subset, above).
 
 ## 9. Next
 

@@ -148,18 +148,9 @@ pub fn install(lua: &Lua, env: &Table) -> crate::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use mlua::{AnyUserData, Function, Lua, ObjectLike, Table};
     use vello_cpu::kurbo::{PathEl, Point};
 
-    use super::{Path, install};
-
-    fn installed() -> (Lua, Table, Function) {
-        let lua = Lua::new();
-        let env = lua.create_table().unwrap();
-        install(&lua, &env).unwrap();
-        let path: Function = env.get("path").unwrap();
-        (lua, env, path)
-    }
+    use super::Path;
 
     #[test]
     fn the_path_records_its_segments() {
@@ -173,33 +164,6 @@ mod tests {
             &[
                 PathEl::MoveTo(Point::new(1.0, 2.0)),
                 PathEl::LineTo(Point::new(3.0, 4.0)),
-                PathEl::ClosePath,
-            ]
-        );
-    }
-
-    #[test]
-    fn the_op_records_its_segments() {
-        let (lua, _env, path) = installed();
-
-        let path: AnyUserData = path.call(()).unwrap();
-        let point = lua.create_table().unwrap();
-        point.set("x", 1.0).unwrap();
-        point.set("y", 2.0).unwrap();
-        path.call_method::<()>("move_to", (point,)).unwrap();
-
-        let point = lua.create_table().unwrap();
-        point.set("x", 3.0).unwrap();
-        path.call_method::<()>("line_to", (point,)).unwrap();
-
-        path.call_method::<()>("close", ()).unwrap();
-
-        let path = path.borrow::<Path>().unwrap();
-        assert_eq!(
-            path.raw.elements(),
-            &[
-                PathEl::MoveTo(Point::new(1.0, 2.0)),
-                PathEl::LineTo(Point::new(3.0, 0.0)),
                 PathEl::ClosePath,
             ]
         );
