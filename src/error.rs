@@ -61,6 +61,8 @@ pub enum Error {
         index: usize,
         error: Arc<mlua::Error>,
     },
+    #[error("failed create file watcher: {0}")]
+    WatcherFailed(Arc<notify::Error>),
 }
 
 impl From<image::ImageError> for Error {
@@ -84,5 +86,11 @@ impl From<mlua::Error> for Error {
 impl From<Error> for mlua::Error {
     fn from(error: Error) -> Self {
         Self::RuntimeError(error.to_string())
+    }
+}
+
+impl From<notify::Error> for Error {
+    fn from(error: notify::Error) -> Self {
+        Self::WatcherFailed(Arc::new(error))
     }
 }

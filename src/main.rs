@@ -14,7 +14,11 @@ mod video;
 mod viewport;
 
 use std::collections::BTreeMap;
+use std::io;
 use std::process::ExitCode;
+use std::sync::mpsc;
+
+use notify::Watcher;
 
 pub use color::Color;
 pub use engine::Engine;
@@ -53,6 +57,8 @@ fn run() -> Result<()> {
         std::process::exit(1);
     }
 
+    let script = std::path::Path::new(&script);
+
     let scale = {
         let mut args = std::env::args();
 
@@ -88,6 +94,7 @@ fn run() -> Result<()> {
     let engine = Engine::load(script, scale)?;
 
     let mut show_help = false;
+    let mut must_watch = false;
     let mut output = None;
     let mut values = BTreeMap::new();
 
@@ -95,6 +102,9 @@ fn run() -> Result<()> {
         match arg.as_str() {
             "--help" => {
                 show_help = true;
+            }
+            "--watch" => {
+                must_watch = true;
             }
             "--scale" => {
                 // Already parsed
@@ -160,7 +170,14 @@ fn run() -> Result<()> {
             .join(" ")
     );
 
-    engine.run(&arguments, output.as_deref().map(std::path::Path::new))
+    let output = output.as_deref().map(std::path::Path::new);
+    engine.run(&arguments, output)?;
+
+    if must_watch {
+        watch(script, scale, &arguments, output)?;
+    }
+
+    Ok(())
 }
 
 fn help(engine: Option<&Engine>) -> String {
@@ -199,4 +216,57 @@ Options:
     );
 
     help
+}
+
+fn watch(
+    script: &std::path::Path,
+    scale: impl Into<Scale>,
+    arguments: &[(String, Option<String>)],
+    output: Option<&std::path::Path>,
+) -> Result<()> {
+    let Some(parent) = script.parent() else {
+        return Err(io::Error::other("script has no parent directory").into());
+    };
+
+    let (sender, receiver) = mpsc::channel();
+    let mut watcher = notify::recommended_watcher(sender)?;
+    watcher.watch(parent, notify::RecursiveMode::Recursive)?;
+
+    let scale = scale.into();
+    let mut i = 0;
+
+    loop {
+        let mut rerun = false;
+
+        for event in receiver.iter().take(1).chain(receiver.try_recv()) {
+            let Ok(event) = event else {
+                return Err(io::Error::other("file watcher stopped unexpectedly").into());
+            };
+
+            if !matches!(
+                event.kind,
+                notify::EventKind::Modify(notify::event::ModifyKind::Data(_))
+            ) {
+                continue;
+            }
+
+            rerun = rerun
+                || event
+                    .paths
+                    .iter()
+                    .any(|path| path.extension().is_some_and(|extension| extension == "lua"));
+        }
+
+        if !rerun {
+            continue;
+        }
+
+        i += 1;
+
+        println!("[#{i:<04}] -------------------");
+
+        let _ = Engine::load(script, scale)
+            .and_then(|engine| engine.run(arguments, output))
+            .inspect_err(|error| eprintln!("error running {}: {error}", script.display()));
+    }
 }

@@ -144,6 +144,12 @@ change is a script edit; an op-behavior change is an engine edit.
 - **Streaming.** `stream` is lazy. The `for` loop over it is the
   sole driver: the engine produces exactly one frame per iteration,
   on demand. Nothing else advances the stream.
+- **Watch.** `--watch` reruns on change: after the first run, the
+  engine watches the script's directory recursively and reruns the
+  whole script on a content change to any `.lua` file in it — the
+  script itself or a module it `require`s. A rerun reuses the first
+  run's scale, output, and arguments; a failure is reported and the
+  watch continues.
 
 ## Color space
 
