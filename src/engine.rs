@@ -31,8 +31,8 @@ impl Engine {
             .map(|dir| dir.to_path_buf())
             .unwrap_or_default();
 
-        image::install(&lua, &env, &script_dir, scale)?;
-        font::install(&lua, &env, &script_dir)?;
+        image::install(&lua, &env, scale)?;
+        font::install(&lua, &env)?;
         rectangle::install(&lua, &env)?;
         path::install(&lua, &env)?;
         text::install(&lua, &env, scale)?;
@@ -198,10 +198,12 @@ fn arguments(script: &Path, module: &Table) -> Result<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Engine, Scale, default_output};
-
     use std::io::Write;
     use std::path::Path;
+
+    use mlua::AnyUserData;
+
+    use super::{Engine, Scale, default_output};
 
     fn load_script(name: &str, source: &str) -> (Engine, std::path::PathBuf) {
         let dir =
@@ -312,6 +314,59 @@ return {
         let engine = Engine::load(&path, Scale::default()).unwrap();
         let required: String = engine.env.get("required").unwrap();
         assert_eq!(required, "config");
+    }
+
+    #[test]
+    fn the_font_resolves_against_the_module_directory() {
+        let dir =
+            std::env::temp_dir().join(format!("pikke-engine-test-{}-font", std::process::id()));
+        let mods = dir.join("mods");
+        std::fs::create_dir_all(&mods).unwrap();
+        std::fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts/NotoSans-Regular.ttf"),
+            mods.join("face.ttf"),
+        )
+        .unwrap();
+        std::fs::write(mods.join("mod.lua"), "face = font('face.ttf')\nreturn {}\n").unwrap();
+        std::fs::write(
+            dir.join("script.lua"),
+            "require('mods/mod')\nreturn { render = function() end }\n",
+        )
+        .unwrap();
+
+        let engine = Engine::load(dir.join("script.lua"), Scale::default()).unwrap();
+        let face: AnyUserData = engine.env.get("face").unwrap();
+        let font = face.borrow::<crate::font::Font>().unwrap();
+        assert_eq!(font.family, "Noto Sans");
+    }
+
+    #[test]
+    fn the_image_resolves_against_the_module_directory() {
+        let dir =
+            std::env::temp_dir().join(format!("pikke-engine-test-{}-image", std::process::id()));
+        let mods = dir.join("mods");
+        std::fs::create_dir_all(&mods).unwrap();
+        std::fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("images/Lenna.png"),
+            mods.join("lena.png"),
+        )
+        .unwrap();
+        std::fs::write(
+            mods.join("mod.lua"),
+            "width = image('lena.png').width\nreturn {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("script.lua"),
+            "require('mods/mod')\nreturn { render = function() end }\n",
+        )
+        .unwrap();
+
+        let engine = Engine::load(dir.join("script.lua"), Scale::default()).unwrap();
+        let width: f32 = engine.env.get("width").unwrap();
+        let source =
+            image::open(Path::new(env!("CARGO_MANIFEST_DIR")).join("images/Lenna.png")).unwrap();
+        assert_eq!(width, source.width() as f32);
     }
 
     #[test]

@@ -1,9 +1,10 @@
-use std::path::Path;
 use std::sync::{LazyLock, Mutex};
 
 use fontique::Blob;
 use mlua::{Lua, Result, Table, UserData, UserDataFields};
 use parley::FontContext;
+
+use crate::lua;
 
 pub(crate) static FONTS: LazyLock<Mutex<FontContext>> =
     LazyLock::new(|| Mutex::new(FontContext::default()));
@@ -19,12 +20,12 @@ impl UserData for Font {
     }
 }
 
-pub fn install(lua: &Lua, env: &Table, script_dir: &Path) -> crate::Result<()> {
-    let script_dir = script_dir.to_path_buf();
+pub fn install(lua: &Lua, env: &Table) -> crate::Result<()> {
     env.set(
         "font",
-        lua.create_function(move |_lua, path: String| -> Result<Font> {
-            let path = script_dir.join(&path);
+        lua.create_function(|lua, path: String| -> Result<Font> {
+            let module_dir = lua::module_dir(lua);
+            let path = module_dir.join(&path);
             let data = std::fs::read(&path).map_err(|error| {
                 mlua::Error::RuntimeError(format!("failed to load {}: {error}", path.display()))
             })?;
@@ -52,36 +53,47 @@ pub fn install(lua: &Lua, env: &Table, script_dir: &Path) -> crate::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
-
-    use mlua::{AnyUserData, Function, Lua, Table};
+    use mlua::{AnyUserData, Lua, Table};
 
     use super::{Font, install};
 
-    fn installed(script_dir: &Path) -> (Lua, Table, Function) {
+    fn installed() -> (Lua, Table) {
         let lua = Lua::new();
         let env = lua.create_table().unwrap();
-        install(&lua, &env, script_dir).unwrap();
-        let font: Function = env.get("font").unwrap();
-        (lua, env, font)
+        install(&lua, &env).unwrap();
+        (lua, env)
     }
 
-    fn fonts_dir() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts")
+    fn call_font(
+        lua: &Lua,
+        env: &Table,
+        source: &str,
+        name: impl Into<String>,
+    ) -> mlua::Result<AnyUserData> {
+        lua.load(source)
+            .set_name(name)
+            .set_environment(env.clone())
+            .call(())
     }
 
     #[test]
     fn the_op_registers_the_vendored_face() {
-        let (_lua, _env, font) = installed(&fonts_dir());
-        let userdata: AnyUserData = font.call("NotoSans-Regular.ttf").unwrap();
-        let font = userdata.borrow::<Font>().unwrap();
+        let (lua, env) = installed();
+        let face = call_font(
+            &lua,
+            &env,
+            "return font('NotoSans-Regular.ttf')",
+            "fonts/face.lua",
+        )
+        .unwrap();
+        let font = face.borrow::<Font>().unwrap();
         assert_eq!(font.family, "Noto Sans");
     }
 
     #[test]
     fn the_op_rejects_a_missing_file() {
-        let (_lua, _env, font) = installed(&fonts_dir());
-        let error = font.call::<AnyUserData>("missing.ttf").unwrap_err();
+        let (lua, env) = installed();
+        let error = call_font(&lua, &env, "font('missing.ttf')", "fonts/face.lua").unwrap_err();
         assert!(error.to_string().contains("failed to load"));
     }
 
@@ -92,8 +104,14 @@ mod tests {
         let file = dir.join("not-a-font.ttf");
         std::fs::write(&file, b"this is not a font file").unwrap();
 
-        let (_lua, _env, font) = installed(&dir);
-        let error = font.call::<AnyUserData>("not-a-font.ttf").unwrap_err();
+        let (lua, env) = installed();
+        let error = call_font(
+            &lua,
+            &env,
+            "font('not-a-font.ttf')",
+            dir.join("face.lua").display().to_string(),
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("not a valid font"));
 
         let _ = std::fs::remove_file(&file);

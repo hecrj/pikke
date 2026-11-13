@@ -274,7 +274,7 @@ pikke/
                  tone-preserving full-range stretch
     font.rs      the `Font`: the face registered in the fontique
                  collection (the file's bytes; the path relative to
-                 the script)
+                 the calling module's directory)
     text.rs      the `Text`: the parley layout at the run scale,
                  the pixel-free ink probe, the ink box, the
                  `bounds`/`width`/`height` accessors (logical px),
@@ -446,7 +446,7 @@ paint is verified with the real text in Phase 7.
 **Phase 7 — text (done).** `font.rs` + `text.rs` on `parley`/
 `fontique`/`skrifa`: `font` registers the face in the shared
 `fontique` collection (the file's bytes, the path relative to the
-script) and hands back a `Font`; `text` lays the string out with
+calling module's directory) and hands back a `Font`; `text` lays the string out with
 `parley` at the run scale (quantized, one run styled from the
 `font`/`size`/`weight` opts — `weight` optional, default 400; the
 variable font's `wght` mapped to normalized coords, the static font

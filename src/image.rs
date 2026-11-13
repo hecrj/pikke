@@ -13,6 +13,7 @@ use vello_cpu::{
 };
 
 use crate::color;
+use crate::lua;
 use crate::{Color, Error, Path, Rectangle, Result, Scale, Text, Viewport};
 
 #[derive(Debug, Clone)]
@@ -1036,13 +1037,12 @@ impl UserData for Reference {
     }
 }
 
-pub fn install(lua: &Lua, env: &Table, script_dir: &path::Path, scale: Scale) -> Result<()> {
-    let script_dir = script_dir.to_path_buf();
-
+pub fn install(lua: &Lua, env: &Table, scale: Scale) -> Result<()> {
     env.set(
         "image",
-        lua.create_function(move |_lua, path: String| -> mlua::Result<Reference> {
-            Ok(Reference::load(script_dir.join(&path), scale))
+        lua.create_function(move |lua, path: String| -> mlua::Result<Reference> {
+            let module_dir = lua::module_dir(lua);
+            Ok(Reference::load(module_dir.join(&path), scale))
         })?,
     )?;
     env.set(
@@ -1143,8 +1143,7 @@ mod tests {
     fn installed_blank(scale: Scale) -> (Lua, Function) {
         let lua = Lua::new();
         let env = lua.create_table().unwrap();
-        let script_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-        install(&lua, &env, script_dir, scale).unwrap();
+        install(&lua, &env, scale).unwrap();
         let blank: Function = env.get("blank").unwrap();
         (lua, blank)
     }
@@ -2090,10 +2089,11 @@ mod tests {
     fn register_vendored_font() {
         let lua = Lua::new();
         let env = lua.create_table().unwrap();
-        let script_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts");
-        crate::font::install(&lua, &env, &script_dir).unwrap();
-        let font: mlua::Function = env.get("font").unwrap();
-        font.call::<mlua::AnyUserData>("NotoSans-Regular.ttf")
+        crate::font::install(&lua, &env).unwrap();
+        lua.load("font('NotoSans-Regular.ttf')")
+            .set_name("fonts/face.lua")
+            .set_environment(env)
+            .call::<()>(())
             .unwrap();
     }
 

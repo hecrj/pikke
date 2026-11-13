@@ -334,7 +334,6 @@ pub fn install(lua: &Lua, env: &Table, scale: Scale) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
     use std::sync::Arc;
 
     use mlua::{AnyUserData, Function, Lua, Table};
@@ -343,13 +342,17 @@ mod tests {
     use crate::font::{Font, install as font_install};
     use crate::{Rectangle, Scale, Viewport};
 
-    fn installed() -> (Lua, Table, Function, Function) {
+    fn installed() -> (Lua, Table, AnyUserData, Function) {
         let lua = Lua::new();
         let env = lua.create_table().unwrap();
-        let script_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts");
-        font_install(&lua, &env, &script_dir).unwrap();
+        font_install(&lua, &env).unwrap();
         install(&lua, &env, Scale::default()).unwrap();
-        let font: Function = env.get("font").unwrap();
+        let font: AnyUserData = lua
+            .load("return font('NotoSans-Regular.ttf')")
+            .set_name("fonts/face.lua")
+            .set_environment(env.clone())
+            .call(())
+            .unwrap();
         let text: Function = env.get("text").unwrap();
         (lua, env, font, text)
     }
@@ -362,7 +365,6 @@ mod tests {
     #[test]
     fn the_op_lays_out_the_vendored_face() {
         let (lua, _env, font, text) = installed();
-        let font: AnyUserData = font.call("NotoSans-Regular.ttf").unwrap();
 
         let opts = lua.create_table().unwrap();
         opts.set("font", font).unwrap();
@@ -408,7 +410,6 @@ mod tests {
     #[test]
     fn the_op_is_degenerate_for_an_empty_string() {
         let (lua, _env, font, text) = installed();
-        let font: AnyUserData = font.call("NotoSans-Regular.ttf").unwrap();
 
         let opts = lua.create_table().unwrap();
         opts.set("font", font).unwrap();
@@ -428,7 +429,6 @@ mod tests {
     #[test]
     fn the_defaults_flow_through() {
         let (lua, _env, font, text) = installed();
-        let font: AnyUserData = font.call("NotoSans-Regular.ttf").unwrap();
 
         let opts = lua.create_table().unwrap();
         opts.set("font", font).unwrap();
@@ -461,7 +461,6 @@ mod tests {
     #[test]
     fn the_binding_validates_its_arguments() {
         let (lua, _env, font, text) = installed();
-        let font: AnyUserData = font.call("NotoSans-Regular.ttf").unwrap();
 
         let eval = |opts: Table| -> String {
             text.call::<AnyUserData>(("Noto", opts))

@@ -77,9 +77,9 @@ change is a script edit; an op-behavior change is an engine edit.
 
 | op | signature | meaning |
 |---|---|---|
-| `image` | `image(path) → Image` | Load a bitmap (path resolved against the script's base). sRGB, with alpha. |
+| `image` | `image(path) → Image` | Load a bitmap (path resolved against the calling module's directory). sRGB, with alpha. |
 | `blank` | `blank({width, height, color}) → Image` | A solid-color image (logical px); `color` a `#RRGGBB` hex, transparent when absent. |
-| `font` | `font(path) → Font` | Load a font (path resolved against the script's base); used by `text`. |
+| `font` | `font(path) → Font` | Load a font (path resolved against the calling module's directory); used by `text`. |
 | `stream` | `stream(program, args) → Stream` | Run an external frame producer (`args`: an array of strings/numbers, numbers rendered for the command line). Returns a **lazy** stream of `Image` frames. |
 | `rectangle` | `rectangle({x, y, size}) → Rectangle` | A rect; `x`/`y` top-left (px), `size` a scalar (w=h) or `{w, h}`. |
 | `path` | `path() → Path` | An empty path (logical px); painted by `fill`. |
