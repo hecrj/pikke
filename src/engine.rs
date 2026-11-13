@@ -48,7 +48,7 @@ impl Engine {
         );
         package.set("path", path)?;
 
-        let chunk = lua.load(source).set_name(script.display().to_string());
+        let chunk = lua.load(source).set_name(format!("@{}", script.display()));
         let module = chunk.call::<Table>(()).map_err(|error| match error {
             mlua::Error::FromLuaConversionError { .. } => Error::ModuleNotTable {
                 script: script.clone(),
