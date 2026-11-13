@@ -40,6 +40,8 @@ No comments allowed, unless explicitly requested during review.
 Every change must be reviewed by the user. Under no circumstance
 you are allowed to commit or push until explicitly asked to.
 
+- **Short subjects:** one imperative clause, backticked identifiers; details in the body.
+
 ## Hygiene
 
 `cargo fmt --check` and `cargo lint` must be clean.
