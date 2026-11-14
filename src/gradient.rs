@@ -65,7 +65,7 @@ impl UserData for Gradient {
     }
 
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method_mut(
+        methods.add_method(
             "stop",
             |_lua, this, (offset, color): (Value, Value)| -> mlua::Result<Gradient> {
                 let offset = lua::number("stop", "offset", Some(offset))?;
@@ -76,13 +76,14 @@ impl UserData for Gradient {
                     ));
                 }
 
+                let mut gradient = this.clone();
                 let color = lua::color("stop", &color)?;
 
                 let mut stops = (*this.stops).to_vec();
                 stops.push(Stop { offset, color });
-                this.stops = stops.into();
+                gradient.stops = stops.into();
 
-                Ok(this.clone())
+                Ok(gradient)
             },
         );
     }
