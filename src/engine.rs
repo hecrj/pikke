@@ -25,6 +25,7 @@ impl Engine {
 
         let lua = Lua::new();
         let env = lua.globals();
+        env.set("scale", f32::from(scale))?;
 
         let script_dir = script
             .parent()
