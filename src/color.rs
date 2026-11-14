@@ -4,28 +4,6 @@ use mlua::{Lua, Table, UserData, UserDataFields, UserDataMethods, Value};
 
 use crate::lua;
 
-pub fn install(lua: &Lua, env: &Table) -> crate::Result<()> {
-    env.set(
-        "srgb",
-        lua.create_function(
-            |_lua, (r, g, b, a): (f32, f32, f32, Option<f32>)| -> mlua::Result<Color> {
-                let color = Color {
-                    r,
-                    g,
-                    b,
-                    a: a.unwrap_or(1.0),
-                    _space: PhantomData,
-                    _alpha: PhantomData,
-                };
-
-                Ok(color.to_linear())
-            },
-        )?,
-    )?;
-
-    Ok(())
-}
-
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Color<Space = Linear, Alpha = Normal> {
     pub r: f32,
@@ -100,6 +78,17 @@ impl Color<Srgb> {
 impl Color {
     pub fn with_alpha(self, alpha: f32) -> Self {
         Self { a: alpha, ..self }
+    }
+
+    pub(crate) fn mix(lower: Color, upper: Color, weight: f32) -> Color {
+        Color {
+            r: lower.r + (upper.r - lower.r) * weight,
+            g: lower.g + (upper.g - lower.g) * weight,
+            b: lower.b + (upper.b - lower.b) * weight,
+            a: lower.a + (upper.a - lower.a) * weight,
+            _space: PhantomData,
+            _alpha: PhantomData,
+        }
     }
 
     pub fn with_luma(self, luma: f32) -> Self {
@@ -273,20 +262,34 @@ impl Color<Linear, Premultiplied> {
     }
 }
 
+pub fn install(lua: &Lua, env: &Table) -> crate::Result<()> {
+    env.set(
+        "srgb",
+        lua.create_function(
+            |_lua, (r, g, b, a): (f32, f32, f32, Option<f32>)| -> mlua::Result<Color> {
+                let color = Color {
+                    r,
+                    g,
+                    b,
+                    a: a.unwrap_or(1.0),
+                    _space: PhantomData,
+                    _alpha: PhantomData,
+                };
+
+                Ok(color.to_linear())
+            },
+        )?,
+    )?;
+
+    Ok(())
+}
+
 impl UserData for Color {
     fn add_methods<M: UserDataMethods<Color>>(methods: &mut M) {
         methods.add_method(
             "with_luma",
             |_lua, this, luma: Value| -> mlua::Result<Color> {
-                let luma = match luma {
-                    Value::Number(luma) => luma as f32,
-                    Value::Integer(luma) => luma as f32,
-                    _ => {
-                        return Err(mlua::Error::RuntimeError(
-                            "with_luma: 'luma' is not a number".to_owned(),
-                        ));
-                    }
-                };
+                let luma = lua::number("with_luma", "luma", Some(luma))?;
 
                 if !luma.is_finite() {
                     return Err(mlua::Error::RuntimeError(
@@ -295,6 +298,21 @@ impl UserData for Color {
                 }
 
                 Ok(this.with_luma(luma))
+            },
+        );
+
+        methods.add_method(
+            "with_alpha",
+            |_lua, this, alpha: Value| -> mlua::Result<Color> {
+                let alpha = lua::number("with_alpha", "alpha", Some(alpha))?;
+
+                if !alpha.is_finite() {
+                    return Err(mlua::Error::RuntimeError(
+                        "with_luma: 'alpha' must be finite".to_owned(),
+                    ));
+                }
+
+                Ok(this.with_alpha(alpha))
             },
         );
 

@@ -3,8 +3,29 @@ use std::path::{Path, PathBuf};
 
 use mlua::{Lua, Result, Value};
 
-use crate::Color;
 use crate::color::Oklch;
+use crate::{Color, Gradient, Paint, Point};
+
+pub fn point(operation: &str, value: &Value) -> Result<Point> {
+    if let Some(point) = value
+        .as_userdata()
+        .and_then(|data| data.borrow::<Point>().ok())
+    {
+        return Ok(*point);
+    }
+
+    if let Some(table) = value.as_table() {
+        let x = number(operation, "x", table.get("x").ok())?;
+        let y = number(operation, "y", table.get("y").ok())?;
+
+        return Ok(Point { x, y });
+    }
+
+    Err(mlua::Error::RuntimeError(format!(
+        "{operation}: a point must be a `Point`, or a {{x,y}} table (was {})",
+        value.type_name()
+    )))
+}
 
 pub fn number(op: &str, name: &str, value: Option<Value>) -> Result<f32> {
     let value = match value {
@@ -63,6 +84,39 @@ pub fn color(operation: &str, value: &Value) -> Result<Color> {
 
     Err(mlua::Error::RuntimeError(format!(
         "{operation}: the color must be a `Color`, an `Oklch`, or a hex string (was {})",
+        value.type_name()
+    )))
+}
+
+pub fn paint(operation: &str, value: &Value) -> Result<Paint> {
+    if value.is_string() {
+        return Ok(Paint::Color(color(operation, value)?));
+    }
+
+    if let Ok(color) = color(operation, value) {
+        return Ok(Paint::Color(color));
+    }
+
+    if let Ok(gradient) = gradient(operation, value) {
+        return Ok(Paint::Gradient(gradient));
+    }
+
+    Err(mlua::Error::RuntimeError(format!(
+        "{operation}: the paint must be a color or a `Gradient` (was {})",
+        value.type_name()
+    )))
+}
+
+pub fn gradient(operation: &str, value: &Value) -> Result<Gradient> {
+    if let Some(gradient) = value
+        .as_userdata()
+        .and_then(|data| data.borrow::<Gradient>().ok())
+    {
+        return Ok(gradient.clone());
+    }
+
+    Err(mlua::Error::RuntimeError(format!(
+        "{operation}: the gradient must be a `Gradient` (was {})",
         value.type_name()
     )))
 }

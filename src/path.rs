@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use mlua::{Lua, Result, Table, UserData, UserDataFields, UserDataMethods, Value};
-use vello_cpu::kurbo::{Affine, BezPath, PathEl};
+use vello_cpu::kurbo::{Affine, BezPath, PathEl, Rect, Shape};
 
 use crate::Scale;
 
@@ -61,6 +61,10 @@ impl Path {
         Self {
             raw: Arc::new(path),
         }
+    }
+
+    pub(crate) fn bounds(&self) -> Rect {
+        self.raw.bounding_box()
     }
 }
 

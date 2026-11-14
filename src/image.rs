@@ -14,7 +14,7 @@ use vello_cpu::{
 
 use crate::color;
 use crate::lua;
-use crate::{Color, Error, Path, Rectangle, Result, Scale, Text, Viewport};
+use crate::{Color, Error, Paint, Path, Rectangle, Result, Scale, Text, Viewport};
 
 #[derive(Debug, Clone)]
 pub struct Image {
@@ -275,12 +275,14 @@ impl Image {
         Ok(())
     }
 
-    pub fn fill(&mut self, fill: impl Into<Geometry>, paint: Color) {
+    pub fn fill(&mut self, fill: impl Into<Geometry>, paint: impl Into<Paint>) {
         let mut resources = Resources::new();
         let mut context = RenderContext::new(self.width(), self.height());
         context.set_paint(AlphaColor::<Srgb>::BLACK);
 
-        match fill.into() {
+        let geometry = fill.into();
+
+        let bounds = match &geometry {
             Geometry::Rectangle(region) => {
                 let scale = self.viewport.scale();
                 let left = region.x * scale;
@@ -300,36 +302,87 @@ impl Image {
                     return;
                 }
 
-                context.fill_rect(
-                    &Rect::new(left.into(), top.into(), right.into(), bottom.into()).round(),
-                );
+                let rect = Rect::new(left.into(), top.into(), right.into(), bottom.into()).round();
+                context.fill_rect(&rect);
+
+                (
+                    rect.x0 as f32,
+                    rect.y0 as f32,
+                    rect.x1 as f32,
+                    rect.y1 as f32,
+                )
             }
             Geometry::Path(path) => {
                 let path = path.snap(self.viewport.scale());
+                let bounds = path.bounds();
 
                 context.fill_path(path.as_ref());
+
+                (
+                    bounds.x0 as f32,
+                    bounds.y0 as f32,
+                    bounds.x1 as f32,
+                    bounds.y1 as f32,
+                )
             }
-        }
+        };
 
         let mut pixmap = Pixmap::new(self.width(), self.height());
         context.render(&mut pixmap, &mut resources);
 
         let buffer = Arc::make_mut(&mut self.buffer);
-        let paint = paint.premultiply();
 
-        for (i, pixel) in pixmap.data().iter().enumerate() {
-            let cover = pixel.a as f32 / 255.0;
+        match paint.into() {
+            Paint::Color(color) => {
+                let color = color.premultiply();
 
-            if cover > 0.0 {
-                let base = buffer.at(i);
-                let layer = paint.scale(cover);
+                for (i, pixel) in pixmap.data().iter().enumerate() {
+                    let cover = pixel.a as f32 / 255.0;
 
-                buffer.put(i, base.over(layer));
+                    if cover > 0.0 {
+                        let base = buffer.at(i);
+                        let layer = color.scale(cover);
+
+                        buffer.put(i, base.over(layer));
+                    }
+                }
+            }
+            Paint::Gradient(gradient) => {
+                let width = pixmap.width() as usize;
+                let (dx, dy) = gradient.axis();
+                let (min_x, min_y, max_x, max_y) = bounds;
+
+                let origin_x = if dx >= 0.0 { min_x } else { max_x };
+                let origin_y = if dy >= 0.0 { min_y } else { max_y };
+                let min_projection = origin_x * dx + origin_y * dy;
+                let span = dx.abs() * (max_x - min_x) + dy.abs() * (max_y - min_y);
+
+                for (y, row) in pixmap.data().chunks_exact(width).enumerate() {
+                    for (x, pixel) in row.iter().enumerate() {
+                        let cover = pixel.a as f32 / 255.0;
+
+                        if cover <= 0.0 {
+                            continue;
+                        }
+
+                        let t = if span > 0.0 {
+                            ((x as f32 + 0.5) * dx + (y as f32 + 0.5) * dy - min_projection) / span
+                        } else {
+                            0.0
+                        };
+                        let color = gradient.color_at(t);
+                        let i = y * width + x;
+                        let base = buffer.at(i);
+                        let layer = color.premultiply().scale(cover);
+
+                        buffer.put(i, base.over(layer));
+                    }
+                }
             }
         }
     }
 
-    pub fn fill_text(&mut self, text: &Text, paint: Color) -> Result<()> {
+    pub fn fill_text(&mut self, text: &Text, paint: impl Into<Paint>) -> Result<()> {
         let (box_width, box_height) = (text.viewport.width(), text.viewport.height());
 
         if box_width == 0 || box_height == 0 {
@@ -399,7 +452,28 @@ impl Image {
         context.render(&mut pixmap, &mut resources);
 
         let buffer = Arc::make_mut(&mut self.buffer);
-        let paint = paint.premultiply();
+        let paint = paint.into();
+
+        let (dx, dy, min_projection, span) = match &paint {
+            Paint::Color(_) => (0.0, 0.0, 0.0, 1.0),
+            Paint::Gradient(gradient) => {
+                let (dx, dy) = gradient.axis();
+                let origin_x = if dx >= 0.0 {
+                    box_x as f32
+                } else {
+                    (box_x + box_width as i32) as f32
+                };
+                let origin_y = if dy >= 0.0 {
+                    box_y as f32
+                } else {
+                    (box_y + box_height as i32) as f32
+                };
+                let min_projection = origin_x * dx + origin_y * dy;
+                let span = dx.abs() * box_width as f32 + dy.abs() * box_height as f32;
+
+                (dx, dy, min_projection, span)
+            }
+        };
 
         for (y, row) in pixmap
             .data()
@@ -430,7 +504,20 @@ impl Image {
                 let i = (canvas_y * self.viewport.width() as i32 + canvas_x) as usize;
                 let base = buffer.at(i);
 
-                let layer = paint.scale(cover);
+                let layer = match &paint {
+                    Paint::Color(color) => color.premultiply().scale(cover),
+                    Paint::Gradient(gradient) => {
+                        let projection =
+                            (canvas_x as f32 + 0.5) * dx + (canvas_y as f32 + 0.5) * dy;
+                        let t = if span > 0.0 {
+                            (projection - min_projection) / span
+                        } else {
+                            0.0
+                        };
+
+                        gradient.color_at(t).premultiply().scale(cover)
+                    }
+                };
 
                 let blended = base
                     .demultiply()
@@ -690,19 +777,19 @@ impl Reference {
         });
     }
 
-    fn fill(&mut self, geometry: impl Into<Geometry>, paint: Color) {
+    fn fill(&mut self, geometry: impl Into<Geometry>, paint: impl Into<Paint>) {
         self.replace(|source| Thunk::Fill {
             source,
             geometry: geometry.into(),
-            paint,
+            paint: paint.into(),
         });
     }
 
-    fn fill_text(&mut self, text: &Text, paint: Color) {
+    fn fill_text(&mut self, text: &Text, paint: impl Into<Paint>) {
         self.replace(|source| Thunk::FillText {
             source,
             text: text.clone(),
-            paint,
+            paint: paint.into(),
         });
     }
 
@@ -793,12 +880,12 @@ pub enum Thunk {
     Fill {
         source: Reference,
         geometry: Geometry,
-        paint: Color,
+        paint: Paint,
     },
     FillText {
         source: Reference,
         text: Text,
-        paint: Color,
+        paint: Paint,
     },
 }
 
@@ -852,7 +939,7 @@ impl Thunk {
                 geometry,
                 paint,
             } => source.evaluate(|source| {
-                source.fill(geometry.clone(), *paint);
+                source.fill(geometry.clone(), paint.clone());
                 Ok(source.clone())
             }),
             Thunk::FillText {
@@ -860,7 +947,7 @@ impl Thunk {
                 text,
                 paint,
             } => source.evaluate(|source| {
-                source.fill_text(text, *paint)?;
+                source.fill_text(text, paint.clone())?;
                 Ok(source.clone())
             }),
         }
@@ -1045,8 +1132,8 @@ impl UserData for Reference {
         );
         methods.add_method_mut(
             "fill",
-            |_lua, this, (region, color): (AnyUserData, Value)| -> mlua::Result<()> {
-                let paint = lua::color("fill", &color)?;
+            |_lua, this, (region, paint): (AnyUserData, Value)| -> mlua::Result<()> {
+                let paint = lua::paint("fill", &paint)?;
 
                 if let Ok(rectangle) = region.borrow::<Rectangle>() {
                     this.fill(*rectangle, paint);

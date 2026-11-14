@@ -85,6 +85,8 @@ change is a script edit; an op-behavior change is an engine edit.
 | `path` | `path() → Path` | An empty path (logical px); painted by `fill`. |
 | `text` | `text(str, {font, size, weight, x, y}) → Text` | Lay out a string; the ink box's top-left at `x`/`y` (default 0). `size`: px. `weight`: font weight (default 400). Painted by `fill`. |
 | `srgb` | `srgb(r, g, b, a) → Color` | A `Color` from the sRGB channels `r`/`g`/`b`/`a` (0–1, the authoring space), decoded to linear light (see *Color space*); `a` defaults to 1.0. |
+| `point` | `point({x, y}) → Point` | A point (px); a missing `x`/`y` is 0. |
+| `gradient` | `gradient(angle) → Gradient` | A linear gradient; `angle` (degrees, clockwise from up) is the direction the color advances (90° → left to right, as in CSS `linear-gradient(90deg)`). A fill spans the region along the axis. |
 
 ### Image fields and methods
 
@@ -96,7 +98,7 @@ change is a script edit; an op-behavior change is an engine edit.
 | `monochrome` | `img:monochrome(color)` | Replace every pixel's color with the shade of `color` (a `Color`, an `Oklch`, or a hex string) carrying the pixel's luma (see *Luma*): each pixel's alpha is unchanged, so the image's luma (`luma_in`) is invariant; a target the hue can't carry falls short (as with `with_luma`), the encode clamps to the gamut. In place. |
 | `resize` | `img:resize({width, height, mode, filter})` | Scale to the target (logical px): exactly one of `width`/`height` — aspect preserved; both — the target box, `mode = "cover"` covers it and center-crops, no `mode` scales to it exactly; `filter = "lanczos"` or `"cubic"` (default). In place. |
 | `blend` | `img:blend(other, {at, color_space})` | Alpha-composite `other` over `img`, `other`'s top-left at `at` (a `Rectangle`, default `(0, 0)`), clipped to the receiver. `color_space`: `"linear"` (default) / `"srgb"`. In place. |
-| `fill` | `img:fill(region, color)` | Paint `region` (a `Rectangle`, `Text`, or `Path`) with `color` (a `Color`, an `Oklch`, or a hex string). The space is chosen by the region's kind: a `Text` region composites in sRGB, a `Rectangle` or `Path` region in linear. In place. |
+| `fill` | `img:fill(region, paint)` | Paint `region` (a `Rectangle`, `Text`, or `Path`) with `paint` (a `Color`, an `Oklch`, a hex string, or a `Gradient`). The space is chosen by the region's kind: a `Text` region composites in sRGB, a `Rectangle` or `Path` region in linear. In place. |
 | `luma_in` | `img:luma_in(region) → number` | Mean luma of `region` (a `Rectangle`), 0–255 (see *Luma*). |
 | `dominant_in` | `img:dominant_in(region) → Color` | The dominant color of `region` (a `Rectangle`): the demultiplied linear channels, clamped to 0–1, quantized to 4 bits, the most-populated bucket weighted by alpha, returned as that bucket's alpha-weighted mean. An empty or fully transparent region is transparent. |
 | `coverage_in` | `img:coverage_in(region) → number` | The count of non-transparent pixels of `region` (a `Rectangle`): the physical pixels whose alpha is nonzero, the region clipped to the image. |
@@ -122,6 +124,14 @@ change is a script edit; an op-behavior change is an engine edit.
 | `move_to` | `path:move_to({x, y})` | Start a subpath at a logical point (`x`/`y` default 0). In place. |
 | `line_to` | `path:line_to({x, y})` | Extend the current subpath with a straight line to a logical point (`x`/`y` default 0). In place. |
 | `close` | `path:close()` | Close the current subpath. In place. |
+
+### Gradient and Point
+
+| op | signature | meaning |
+|---|---|---|
+| `stop` | `gradient:stop(offset, color) → Gradient` | Add a stop at `offset` (0–1) with `color` (a `Color`, an `Oklch`, or a hex string); returns the gradient so stops chain. |
+| `x` | `point.x → number` | The point's x in px. |
+| `y` | `point.y → number` | The point's y in px. |
 
 ### Color methods
 
