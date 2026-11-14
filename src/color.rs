@@ -76,6 +76,10 @@ impl Color<Srgb> {
 }
 
 impl Color {
+    pub fn with_alpha(self, alpha: f32) -> Self {
+        Self { a: alpha, ..self }
+    }
+
     pub fn with_luma(self, luma: f32) -> Self {
         let luma = luma.clamp(0.0, 1.0);
         let current = self.premultiply().luma();

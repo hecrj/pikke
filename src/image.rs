@@ -108,6 +108,47 @@ impl Image {
         out
     }
 
+    pub fn autocontrast(&mut self) {
+        let (lo, hi) = self.buffer.luma();
+
+        if hi <= lo {
+            return;
+        }
+
+        let buffer = Arc::make_mut(&mut self.buffer);
+
+        let scale = 1.0 / (hi - lo);
+        let stretch = |value: f32| {
+            if value < lo || value > hi {
+                value
+            } else {
+                (value - lo) * scale
+            }
+        };
+
+        buffer.apply(|mut color| {
+            color.r = stretch(color.r);
+            color.g = stretch(color.g);
+            color.b = stretch(color.b);
+            color
+        });
+    }
+
+    pub fn invert(&mut self) {
+        let buffer = Arc::make_mut(&mut self.buffer);
+        buffer.invert();
+    }
+
+    pub fn monochrome(&mut self, color: Color) {
+        let buffer = Arc::make_mut(&mut self.buffer);
+
+        buffer.apply(|pixel| {
+            let shade = color.with_alpha(pixel.a);
+
+            shade.with_luma(pixel.luma()).premultiply()
+        });
+    }
+
     pub fn resize(
         &mut self,
         dimension: Dimension,
@@ -171,37 +212,6 @@ impl Image {
         self.viewport = new_viewport;
 
         Ok(())
-    }
-
-    pub fn autocontrast(&mut self) {
-        let (lo, hi) = self.buffer.luma();
-
-        if hi <= lo {
-            return;
-        }
-
-        let buffer = Arc::make_mut(&mut self.buffer);
-
-        let scale = 1.0 / (hi - lo);
-        let stretch = |value: f32| {
-            if value < lo || value > hi {
-                value
-            } else {
-                (value - lo) * scale
-            }
-        };
-
-        buffer.apply(|mut color| {
-            color.r = stretch(color.r);
-            color.g = stretch(color.g);
-            color.b = stretch(color.b);
-            color
-        });
-    }
-
-    pub fn invert(&mut self) {
-        let buffer = Arc::make_mut(&mut self.buffer);
-        buffer.invert();
     }
 
     pub fn blend(&mut self, other: &Image, at: Rectangle, space: color::Space) -> Result<()> {
@@ -643,6 +653,10 @@ impl Reference {
         self.replace(|source| Thunk::Invert { source });
     }
 
+    fn monochrome(&mut self, color: Color) {
+        self.replace(|source| Thunk::Monochrome { source, color });
+    }
+
     fn blend(&mut self, other: &Reference, at: Rectangle, space: color::Space) {
         self.replace(|source| Thunk::Blend {
             source,
@@ -738,6 +752,10 @@ pub enum Thunk {
     Invert {
         source: Reference,
     },
+    Monochrome {
+        source: Reference,
+        color: Color,
+    },
     Blend {
         source: Reference,
         other: Reference,
@@ -784,6 +802,10 @@ impl Thunk {
             }),
             Thunk::Invert { source } => source.evaluate(|source| {
                 source.invert();
+                Ok(source.clone())
+            }),
+            Thunk::Monochrome { source, color } => source.evaluate(|source| {
+                source.monochrome(*color);
                 Ok(source.clone())
             }),
             Thunk::Blend {
@@ -882,21 +904,6 @@ impl OutlinePen for PathPen {
     }
 }
 
-fn color_from_hex(operation: &str, color: &str) -> mlua::Result<Color> {
-    let message = || format!("{operation}: {color} is not a #RRGGBB hex color");
-    let digits = color
-        .strip_prefix('#')
-        .filter(|digits| digits.len() == 6)
-        .ok_or_else(|| mlua::Error::RuntimeError(message()))?;
-
-    let channel = |start: usize| -> mlua::Result<u8> {
-        u8::from_str_radix(&digits[start..start + 2], 16)
-            .map_err(|_| mlua::Error::RuntimeError(message()))
-    };
-
-    Ok(Color::from_rgba8([channel(0)?, channel(2)?, channel(4)?, 255]).to_linear())
-}
-
 impl UserData for Reference {
     fn add_fields<F: UserDataFields<Reference>>(fields: &mut F) {
         fields.add_meta_field("__name", "Image");
@@ -972,6 +979,14 @@ impl UserData for Reference {
             Ok(())
         });
         methods.add_method_mut(
+            "monochrome",
+            |_lua, this, color: Value| -> mlua::Result<()> {
+                let color = lua::color("monochrome", &color)?;
+                this.monochrome(color);
+                Ok(())
+            },
+        );
+        methods.add_method_mut(
             "blend",
             |lua, this, (other, opts): (AnyUserData, Option<Table>)| -> mlua::Result<()> {
                 let opts = match opts {
@@ -1003,24 +1018,7 @@ impl UserData for Reference {
         methods.add_method_mut(
             "fill",
             |_lua, this, (region, color): (AnyUserData, Value)| -> mlua::Result<()> {
-                let paint = if let Some(color) = color.as_string() {
-                    color_from_hex("fill", &color.to_str()?)?
-                } else if let Some(color) = color
-                    .as_userdata()
-                    .and_then(|color| color.borrow::<Color>().ok())
-                {
-                    *color
-                } else if let Some(color) = color
-                    .as_userdata()
-                    .and_then(|color| color.borrow::<color::Oklch>().ok())
-                {
-                    color.to_linear_rgb()
-                } else {
-                    return Err(mlua::Error::RuntimeError(format!(
-                        "fill: the color must be a `Color`, an `Oklch`, or a hex string (was {})",
-                        color.type_name()
-                    )));
-                };
+                let paint = lua::color("fill", &color)?;
 
                 if let Ok(rectangle) = region.borrow::<Rectangle>() {
                     this.fill(*rectangle, paint);
@@ -1099,7 +1097,7 @@ pub fn install(lua: &Lua, env: &Table, scale: Scale) -> Result<()> {
             }
 
             let paint = if let Some(color) = color {
-                color_from_hex("blank", &color)?
+                lua::hex("blank", &color)?
             } else {
                 Color::TRANSPARENT
             };

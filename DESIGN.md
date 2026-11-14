@@ -92,6 +92,7 @@ change is a script edit; an op-behavior change is an engine edit.
 | `clone` | `img:clone() → Image` | A copy sharing `img`'s buffer (cheap); the copy diverges from `img` (copy-on-write) on its first in-place write. The branch point. |
 | `autocontrast` | `img:autocontrast()` | Histogram-stretch to full range, **tone-preserving** (no highlight/shadow clip). In place. |
 | `invert` | `img:invert()` | Invert every pixel's color: the unpremultiplied channels become `1 − c`, the alpha is unchanged. In place. |
+| `monochrome` | `img:monochrome(color)` | Replace every pixel's color with the shade of `color` (a `Color`, an `Oklch`, or a hex string) carrying the pixel's luma (see *Luma*): each pixel's alpha is unchanged, so the image's luma (`luma_in`) is invariant; a target the hue can't carry falls short (as with `with_luma`), the encode clamps to the gamut. In place. |
 | `resize` | `img:resize({width, height, mode, filter})` | Scale to the target (logical px): exactly one of `width`/`height` — aspect preserved; both — the target box, `mode = "cover"` covers it and center-crops, no `mode` scales to it exactly; `filter = "lanczos"` or `"cubic"` (default). In place. |
 | `blend` | `img:blend(other, {at, color_space})` | Alpha-composite `other` over `img`, `other`'s top-left at `at` (a `Rectangle`, default `(0, 0)`), clipped to the receiver. `color_space`: `"linear"` (default) / `"srgb"`. In place. |
 | `fill` | `img:fill(region, color)` | Paint `region` (a `Rectangle`, `Text`, or `Path`) with `color` (a `Color`, an `Oklch`, or a hex string). The space is chosen by the region's kind: a `Text` region composites in sRGB, a `Rectangle` or `Path` region in linear. In place. |
@@ -146,10 +147,10 @@ boundary's single rounding).
 ## Execution model
 
 - **In-place ops; one explicit copy.** The pixel ops (`autocontrast`,
-  `invert`, `resize`, `blend`, `fill`) mutate the receiver in place
-  and return nothing. `clone()` is the model's only copy and the
-  branch point: fork the base, paint on it, `clone()` to start a
-  fresh one.
+  `invert`, `monochrome`, `resize`, `blend`, `fill`) mutate the
+  receiver in place and return nothing. `clone()` is the model's only
+  copy and the branch point: fork the base, paint on it, `clone()` to
+  start a fresh one.
 - **No hidden canvas.** The running composite is a value the script
   threads explicitly (`base` → `output`). There is no global state.
 - **Streaming.** `stream` is lazy. The `for` loop over it is the
@@ -172,8 +173,9 @@ boundary's single rounding).
   is `layer + base·(1 − layer.a)` — no division, and a 0 or 1 alpha
   on either side falls out of the formula exactly. A fully
   transparent pixel's color is discarded with the alpha — the ops
-  defined on stored channels (the luma, the autocontrast histogram) read
-  such a pixel as colorless; exact while the region is opaque.
+  defined on stored channels (the luma, the autocontrast histogram,
+  the monochrome) read such a pixel as colorless; exact while the
+  region is opaque.
 - **`text` is sRGB, always.** Type is authored in sRGB; no opt-out.
 - **Opt-in sRGB.** `color_space = "srgb"` switches a `blend` to sRGB
   compositing — for layers authored in sRGB (a logo over the linear
