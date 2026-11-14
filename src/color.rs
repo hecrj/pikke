@@ -1,8 +1,30 @@
 use std::marker::PhantomData;
 
-use mlua::{UserData, UserDataFields, UserDataMethods, Value};
+use mlua::{Lua, Table, UserData, UserDataFields, UserDataMethods, Value};
 
 use crate::lua;
+
+pub fn install(lua: &Lua, env: &Table) -> crate::Result<()> {
+    env.set(
+        "srgb",
+        lua.create_function(
+            |_lua, (r, g, b, a): (f32, f32, f32, Option<f32>)| -> mlua::Result<Color> {
+                let color = Color {
+                    r,
+                    g,
+                    b,
+                    a: a.unwrap_or(1.0),
+                    _space: PhantomData,
+                    _alpha: PhantomData,
+                };
+
+                Ok(color.to_linear())
+            },
+        )?,
+    )?;
+
+    Ok(())
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Color<Space = Linear, Alpha = Normal> {

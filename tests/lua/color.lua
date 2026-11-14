@@ -24,6 +24,23 @@ assert(bright.r == 255 and bright.g == 255 and bright.b == 255, "the target clam
 local dark = sample(white:with_luma(-1.0))
 assert(dark.r == 0 and dark.g == 0 and dark.b == 0, "the target clamps to zero")
 
+local red = sample(srgb(1.0, 0.0, 0.0))
+assert(red.r == 255, red.r)
+assert(red.g == 0, red.g)
+assert(red.b == 0, red.b)
+assert(red.a == 255, "the alpha defaults to one")
+
+local quarter = sample(srgb(0.25, 0.25, 0.25))
+assert(quarter.r == 64 and quarter.g == 64 and quarter.b == 64, "the 8-bit round trip is exact")
+
+local black = sample(srgb(0.0, 0.0, 0.0))
+assert(black.r == 0 and black.g == 0 and black.b == 0, "black stays black")
+assert(black.a == 255, "the alpha defaults to one")
+
+local half = sample(srgb(1.0, 1.0, 1.0, 0.5))
+assert(half.a == 128, half.a)
+assert(half.r == half.g and half.g == half.b and half.r > 0, "the channels keep the alpha")
+
 must_fail("with_luma: 'luma' is not a number", function()
   gray:with_luma("x")
 end)

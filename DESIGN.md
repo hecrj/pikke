@@ -84,6 +84,7 @@ change is a script edit; an op-behavior change is an engine edit.
 | `rectangle` | `rectangle({x, y, size}) → Rectangle` | A rect; `x`/`y` top-left (px), `size` a scalar (w=h) or `{w, h}`. |
 | `path` | `path() → Path` | An empty path (logical px); painted by `fill`. |
 | `text` | `text(str, {font, size, weight, x, y}) → Text` | Lay out a string; the ink box's top-left at `x`/`y` (default 0). `size`: px. `weight`: font weight (default 400). Painted by `fill`. |
+| `srgb` | `srgb(r, g, b, a) → Color` | A `Color` from the sRGB channels `r`/`g`/`b`/`a` (0–1, the authoring space), decoded to linear light (see *Color space*); `a` defaults to 1.0. |
 
 ### Image fields and methods
 
