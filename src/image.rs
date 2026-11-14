@@ -399,15 +399,27 @@ impl Image {
             scale.to_physical_signed(text.ink_min.1)?,
         );
 
-        let (scratch_width, scratch_height) = (box_width + 2, box_height + 2);
-        let (origin_x, origin_y) = (box_x - 1, box_y - 1);
+        let (ink_width, ink_height) = (self.viewport.width() as i32, self.viewport.height() as i32);
+        let raster_x0 = (box_x - 1).max(0);
+        let raster_y0 = (box_y - 1).max(0);
+        let raster_x1 = (box_x + box_width as i32 + 1).min(ink_width);
+        let raster_y1 = (box_y + box_height as i32 + 1).min(ink_height);
+
+        if raster_x1 <= raster_x0 || raster_y1 <= raster_y0 {
+            return Ok(());
+        }
+
+        let (raster_width, raster_height) = (
+            (raster_x1 - raster_x0) as u16,
+            (raster_y1 - raster_y0) as u16,
+        );
         let (layout_x, layout_y) = (box_x - ink_x, box_y - ink_y);
 
         let mut resources = Resources::new();
-        let mut context = RenderContext::new(scratch_width, scratch_height);
+        let mut context = RenderContext::new(raster_width, raster_height);
         context.set_transform(Affine::translate((
-            (layout_x - origin_x) as f64,
-            (layout_y - origin_y) as f64,
+            (layout_x - raster_x0) as f64,
+            (layout_y - raster_y0) as f64,
         )));
         context.set_paint(AlphaColor::<Srgb>::BLACK);
 
@@ -448,7 +460,7 @@ impl Image {
             }
         }
 
-        let mut pixmap = Pixmap::new(scratch_width, scratch_height);
+        let mut pixmap = Pixmap::new(raster_width, raster_height);
         context.render(&mut pixmap, &mut resources);
 
         let buffer = Arc::make_mut(&mut self.buffer);
@@ -477,7 +489,7 @@ impl Image {
 
         for (y, row) in pixmap
             .data()
-            .chunks_exact(scratch_width as usize)
+            .chunks_exact(raster_width as usize)
             .enumerate()
         {
             for (x, pixel) in row.iter().enumerate() {
@@ -487,21 +499,9 @@ impl Image {
                     continue;
                 }
 
-                let canvas_x = origin_x + x as i32;
-                let canvas_y = origin_y + y as i32;
-                let inside_box = (box_x..box_x + box_width as i32).contains(&canvas_x)
-                    && (box_y..box_y + box_height as i32).contains(&canvas_y);
-
-                let inside_canvas = canvas_x >= 0
-                    && canvas_x < self.viewport.width() as i32
-                    && canvas_y >= 0
-                    && canvas_y < self.viewport.height() as i32;
-
-                if !inside_box || !inside_canvas {
-                    continue;
-                }
-
-                let i = (canvas_y * self.viewport.width() as i32 + canvas_x) as usize;
+                let canvas_x = raster_x0 + x as i32;
+                let canvas_y = raster_y0 + y as i32;
+                let i = (canvas_y * ink_width + canvas_x) as usize;
                 let base = buffer.at(i);
 
                 let layer = match &paint {
@@ -2023,6 +2023,8 @@ mod tests {
                 let pixel = (y * 200 + x) as usize * 4;
                 let inside =
                     (x >= box_x && x < box_x + box_width) && (y >= box_y && y < box_y + box_height);
+                let inside_scratch = (x >= box_x - 1 && x < box_x + box_width + 1)
+                    && (y >= box_y - 1 && y < box_y + box_height + 1);
                 if inside {
                     let alpha = painted[pixel + 3];
                     if alpha == 255 {
@@ -2042,6 +2044,18 @@ mod tests {
                         partial += 1;
                     } else if alpha > 0 {
                         partial += 1;
+                    } else {
+                        assert_eq!(&painted[pixel..pixel + 4], &[0, 0, 0, 0]);
+                    }
+                } else if inside_scratch {
+                    let alpha = painted[pixel + 3];
+                    if alpha > 0 {
+                        assert!(
+                            painted[pixel].abs_diff(200) <= 2
+                                && painted[pixel + 1].abs_diff(30) <= 2
+                                && painted[pixel + 2].abs_diff(60) <= 2,
+                            "pixel ({x}, {y})"
+                        );
                     } else {
                         assert_eq!(&painted[pixel..pixel + 4], &[0, 0, 0, 0]);
                     }
