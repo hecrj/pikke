@@ -573,6 +573,30 @@ impl Image {
         .demultiply())
     }
 
+    pub fn coverage_in(&self, region: Rectangle) -> Result<usize> {
+        let scale = self.viewport.scale();
+        let left = scale.to_physical_signed(region.x)?;
+        let top = scale.to_physical_signed(region.y)?;
+        let right = scale.to_physical_signed(region.x + region.width)?;
+        let bottom = scale.to_physical_signed(region.y + region.height)?;
+
+        let left = left.max(0).min(self.width() as i32);
+        let top = top.max(0).min(self.height() as i32);
+        let right = right.max(0).min(self.width() as i32);
+        let bottom = bottom.max(0).min(self.height() as i32);
+
+        if left >= right || top >= bottom {
+            return Ok(0);
+        }
+
+        let width = self.width() as i32;
+
+        Ok((top..bottom)
+            .flat_map(|y| left + y * width..right + y * width)
+            .filter(|&x| self.buffer.at(x as usize).a > 0.0)
+            .count())
+    }
+
     pub fn write(&self, output: &path::Path) -> Result<()> {
         let file_name = output.file_name().ok_or_else(|| {
             io::Error::other(format!("invalid output path: {}", output.display()))
@@ -700,6 +724,10 @@ impl Reference {
 
     fn dominant_in(&self, region: Rectangle) -> Result<Color> {
         self.evaluate(|image| image.dominant_in(region))
+    }
+
+    fn coverage_in(&self, region: Rectangle) -> Result<usize> {
+        self.evaluate(|image| image.coverage_in(region))
     }
 
     fn evaluate<T>(&self, f: impl FnOnce(&mut Image) -> Result<T>) -> Result<T> {
@@ -1052,6 +1080,14 @@ impl UserData for Reference {
             |_lua, this, region: AnyUserData| -> mlua::Result<Color> {
                 let region: Rectangle = *region.borrow::<Rectangle>()?;
                 Ok(this.dominant_in(region)?)
+            },
+        );
+
+        methods.add_method(
+            "coverage_in",
+            |_lua, this, region: AnyUserData| -> mlua::Result<usize> {
+                let region: Rectangle = *region.borrow::<Rectangle>()?;
+                Ok(this.coverage_in(region)?)
             },
         );
 

@@ -98,6 +98,7 @@ change is a script edit; an op-behavior change is an engine edit.
 | `fill` | `img:fill(region, color)` | Paint `region` (a `Rectangle`, `Text`, or `Path`) with `color` (a `Color`, an `Oklch`, or a hex string). The space is chosen by the region's kind: a `Text` region composites in sRGB, a `Rectangle` or `Path` region in linear. In place. |
 | `luma_in` | `img:luma_in(region) → number` | Mean luma of `region` (a `Rectangle`), 0–255 (see *Luma*). |
 | `dominant_in` | `img:dominant_in(region) → Color` | The dominant color of `region` (a `Rectangle`): the demultiplied linear channels, clamped to 0–1, quantized to 4 bits, the most-populated bucket weighted by alpha, returned as that bucket's alpha-weighted mean. An empty or fully transparent region is transparent. |
+| `coverage_in` | `img:coverage_in(region) → number` | The count of non-transparent pixels of `region` (a `Rectangle`): the physical pixels whose alpha is nonzero, the region clipped to the image. |
 | `pixel` | `img:pixel(x, y) → Pixel` | The pixel at `(x, y)` (logical px) as a `Pixel` (sRGB, 0–255, § Pixel); nil outside the image. |
 | `width` | `img.width → number` | The image's width in logical px. |
 | `height` | `img.height → number` | The image's height in logical px. |
