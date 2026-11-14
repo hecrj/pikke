@@ -59,7 +59,7 @@ if fail:
 ]]
 
 do
-  local stream = stream("python3", 100, 100, { "-c", producer, "--frames", "3" })
+  local stream = stream("python3", 100, 100, { "-c", producer, "--frames", 3 })
 
   for frame_number = 0, 2 do
     local frame = stream()

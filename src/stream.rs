@@ -213,6 +213,9 @@ pub fn install(lua: &Lua, env: &Table, scale: Scale) -> Result<()> {
 
                             argv.push(string);
                         }
+                        Ok(Value::Integer(integer)) => {
+                            argv.push(integer.to_string());
+                        }
                         Ok(Value::Number(number)) => {
                             argv.push(number.to_string());
                         }
