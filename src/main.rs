@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::io;
 use std::process::ExitCode;
 use std::sync::mpsc;
+use std::thread;
 
 use notify::Watcher;
 
@@ -33,37 +34,66 @@ fn run() -> Result<()> {
 
     let script = std::path::Path::new(&script);
 
-    let scale = {
+    let mut scale = 1.0;
+    let mut threads = None;
+
+    {
         let mut args = std::env::args();
 
-        loop {
-            let Some(arg) = args.next() else {
-                break 1.0;
-            };
-
-            if arg == "--scale" {
-                let value = args.next().ok_or_else(|| Error::OptionMissingValue {
-                    option: "--scale".to_owned(),
-                })?;
-
-                let value: f32 = value.parse().map_err(|_| Error::OptionInvalidValue {
-                    option: "--scale".to_owned(),
-                    value: value.clone(),
-                    note: "not a number".to_owned(),
-                })?;
-
-                if value <= 0.0 || !value.is_finite() {
-                    return Err(Error::OptionInvalidValue {
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--scale" => {
+                    let value = args.next().ok_or_else(|| Error::OptionMissingValue {
                         option: "--scale".to_owned(),
-                        value: value.to_string(),
-                        note: "must be a positive number".to_owned(),
-                    });
-                }
+                    })?;
 
-                break value;
+                    let value: f32 = value.parse().map_err(|_| Error::OptionInvalidValue {
+                        option: "--scale".to_owned(),
+                        value: value.clone(),
+                        note: "not a number".to_owned(),
+                    })?;
+
+                    if value <= 0.0 || !value.is_finite() {
+                        return Err(Error::OptionInvalidValue {
+                            option: "--scale".to_owned(),
+                            value: value.to_string(),
+                            note: "must be a positive number".to_owned(),
+                        });
+                    }
+
+                    scale = value;
+                }
+                "--threads" => {
+                    let value = args.next().ok_or_else(|| Error::OptionMissingValue {
+                        option: "--threads".to_owned(),
+                    })?;
+
+                    threads =
+                        Some(
+                            value
+                                .parse::<usize>()
+                                .map_err(|_| Error::OptionInvalidValue {
+                                    option: "--threads".to_owned(),
+                                    value,
+                                    note: "must be a valid positive integer".to_owned(),
+                                })?,
+                        );
+                }
+                _ => {}
             }
         }
-    };
+    }
+
+    if let Some(threads) = threads {
+        let max_threads = thread::available_parallelism()
+            .map(std::num::NonZero::get)
+            .unwrap_or(1);
+
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads.clamp(1, max_threads))
+            .build_global()
+            .expect("build global thread pool")
+    }
 
     let engine = Engine::load(script, scale)?;
 
@@ -85,6 +115,10 @@ fn run() -> Result<()> {
                 must_watch = true;
             }
             "--scale" => {
+                // Already parsed
+                let _ = args.next();
+            }
+            "--threads" => {
                 // Already parsed
                 let _ = args.next();
             }
@@ -175,6 +209,7 @@ Arguments:
 
 Options:
   --scale <s>       The run's scale (default 1)
+  --threads <n>     The worker thread count (default: core count)
   --output <path>   The still's path; the video is the same path as .mp4 (default <script>.png)
   --stdin           Read jobs from stdin, one JSON object per line
   --help            Print this help",
@@ -221,81 +256,80 @@ fn batch(
         static ENGINE: OnceCell<Result<Engine>> = const { OnceCell::new() };
     }
 
+    fn work(script: PathBuf, arguments: &[String], scale: f32, job: &str) -> Result<()> {
+        let mut values: serde_json::Map<String, serde_json::Value> = serde_json::from_str(job)?;
+
+        for key in values.keys() {
+            if key != "output" && !arguments.contains(key) {
+                return Err(Error::OptionUnknown {
+                    option: key.clone(),
+                });
+            }
+        }
+
+        let output = values
+            .remove("output")
+            .as_ref()
+            .and_then(serde_json::Value::as_str)
+            .map(std::path::PathBuf::from)
+            .ok_or_else(|| Error::NoBatchOutput(job.to_owned()))?;
+
+        let arguments: Vec<_> = values
+            .into_iter()
+            .map(|(key, value)| argument(&key, value))
+            .collect::<Result<_>>()?;
+
+        ENGINE.with(|cell| {
+            let engine = cell
+                .get_or_init(|| Engine::load(script, scale))
+                .as_ref()
+                .map_err(Error::clone)?;
+
+            engine.run(&arguments, Some(&output))
+        })
+    }
+
     let reader = io::BufReader::new(input);
     let mut lines = reader.lines();
     let arguments: Arc<[String]> = Arc::from(arguments);
     let errors = Arc::new(Mutex::new(Vec::new()));
 
-    rayon::scope(|scope| {
-        let max_in_flight = 4 * rayon::current_num_threads();
-        let (sender, permits) = mpsc::sync_channel(max_in_flight);
+    let max_in_flight = 4 * rayon::current_num_threads();
+    let (sender, permits) = mpsc::sync_channel(max_in_flight);
 
-        for _ in 0..max_in_flight {
+    for _ in 0..max_in_flight {
+        let _ = sender.send(());
+    }
+
+    while let Some(job) = lines.next().transpose()? {
+        let job = job.trim();
+
+        if job.is_empty() {
+            continue;
+        }
+
+        let _ = permits.recv();
+        let script = script.to_owned();
+        let job = job.to_owned();
+        let arguments = arguments.clone();
+        let errors = errors.clone();
+        let sender = sender.clone();
+
+        rayon::spawn(move || {
+            if let Err(error) = work(script, &arguments, scale, &job) {
+                errors
+                    .lock()
+                    .expect("lock errors")
+                    .push((job.clone(), error));
+            }
+
             let _ = sender.send(());
-        }
+        });
+    }
 
-        while let Some(job) = lines.next().transpose()? {
-            let job = job.trim();
-
-            if job.is_empty() {
-                continue;
-            }
-
-            let _ = permits.recv();
-            let script = script.to_owned();
-            let job = job.to_owned();
-            let arguments = arguments.clone();
-            let errors = errors.clone();
-            let sender = sender.clone();
-
-            fn work(script: PathBuf, arguments: &[String], scale: f32, job: &str) -> Result<()> {
-                let mut values: serde_json::Map<String, serde_json::Value> =
-                    serde_json::from_str(job)?;
-
-                for key in values.keys() {
-                    if key != "output" && !arguments.contains(key) {
-                        return Err(Error::OptionUnknown {
-                            option: key.clone(),
-                        });
-                    }
-                }
-
-                let output = values
-                    .remove("output")
-                    .as_ref()
-                    .and_then(serde_json::Value::as_str)
-                    .map(std::path::PathBuf::from)
-                    .ok_or_else(|| Error::NoBatchOutput(job.to_owned()))?;
-
-                let arguments: Vec<_> = values
-                    .into_iter()
-                    .map(|(key, value)| argument(&key, value))
-                    .collect::<Result<_>>()?;
-
-                ENGINE.with(|cell| {
-                    let engine = cell
-                        .get_or_init(|| Engine::load(script, scale))
-                        .as_ref()
-                        .map_err(Error::clone)?;
-
-                    engine.run(&arguments, Some(&output))
-                })
-            }
-
-            scope.spawn(move |_scope| {
-                if let Err(error) = work(script, &arguments, scale, &job) {
-                    errors
-                        .lock()
-                        .expect("lock errors")
-                        .push((job.clone(), error));
-                }
-
-                let _ = sender.send(());
-            });
-        }
-
-        Ok::<_, Error>(())
-    })?;
+    for _ in 0..max_in_flight {
+        let _ = permits.recv();
+    }
 
     let mut errors = errors.lock().expect("lock errors");
 
