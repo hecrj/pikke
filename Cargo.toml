@@ -18,5 +18,12 @@ parlance = { version = "0.1", default-features = false, features = ["std"] }
 skrifa = { version = "0.44", default-features = false, features = ["std"] }
 vello_cpu = { version = "0.3", default-features = false, features = ["std", "u8_pipeline"] }
 
+[dev-dependencies]
+criterion = "0.8.2"
+
+[[bench]]
+name = "lua"
+harness = false
+
 [lints.clippy]
 too_many_arguments = "allow"
