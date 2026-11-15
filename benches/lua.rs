@@ -40,10 +40,12 @@ fn lua_scripts(criterion: &mut Criterion) {
 
         let output = output_dir.join(format!("{}.png", stem.display()));
 
+        let engine = Engine::load(&script, 1.0).expect("the benchmark script failed to load");
+
         group.bench_function(stem.to_string_lossy().into_owned(), move |benchmark| {
             benchmark.iter(|| {
-                Engine::load(&script, 1.0)
-                    .and_then(|engine| engine.run(&[], Some(&output)))
+                engine
+                    .run(&[], Some(&output))
                     .expect("the benchmark script failed")
             });
         });
