@@ -569,16 +569,21 @@ impl Image {
             return Ok(0.0);
         }
 
+        let width = self.width() as usize;
+        let (left, right) = (left as usize, right as usize);
         let mut luma = 0.0f32;
 
-        for y in top..bottom {
-            for x in left..right {
-                let i = (y * self.width() as i32 + x) as usize;
-                luma += self.buffer.at(i).luma();
+        for row in top as usize..bottom as usize {
+            let row = self.buffer.row(row, width).crop(left, right);
+
+            for color in row.iter() {
+                luma += color.luma();
             }
         }
 
-        Ok(luma / ((right - left) * (bottom - top)) as f32 * 255.0)
+        let count = (right - left) * (bottom - top) as usize;
+
+        Ok(luma / count as f32 * 255.0)
     }
 
     pub fn dominant_in(&self, region: Rectangle) -> Result<Color> {
@@ -606,28 +611,32 @@ impl Image {
             return Ok(Color::TRANSPARENT);
         }
 
+        let width = self.width() as usize;
+        let (left, right) = (left as usize, right as usize);
+
         let mut buckets = vec![Bucket::default(); 16 * 16 * 16];
 
-        for y in top..bottom {
-            for x in left..right {
-                let i = (y * self.width() as i32 + x) as usize;
-                let color = self.buffer.at(i);
+        for row in top as usize..bottom as usize {
+            let row = self.buffer.row(row, width).crop(left, right);
 
-                if color.a > 0.0 {
-                    let r = (color.r / color.a).clamp(0.0, 1.0);
-                    let g = (color.g / color.a).clamp(0.0, 1.0);
-                    let b = (color.b / color.a).clamp(0.0, 1.0);
+            for color in row.iter() {
+                let a = color.a;
 
-                    let index = (r * 15.0).round() as usize
+                if a > 0.0 {
+                    let r = (color.r / a).clamp(0.0, 1.0);
+                    let g = (color.g / a).clamp(0.0, 1.0);
+                    let b = (color.b / a).clamp(0.0, 1.0);
+
+                    let bucket_index = (r * 15.0).round() as usize
                         + (g * 15.0).round() as usize * 16
                         + (b * 15.0).round() as usize;
 
-                    let bucket = &mut buckets[index];
-                    bucket.weight += color.a;
-                    bucket.r += r * color.a;
-                    bucket.g += g * color.a;
-                    bucket.b += b * color.a;
-                    bucket.a += color.a * color.a;
+                    let bucket = &mut buckets[bucket_index];
+                    bucket.weight += a;
+                    bucket.r += r * a;
+                    bucket.g += g * a;
+                    bucket.b += b * a;
+                    bucket.a += a * a;
                 }
             }
         }
@@ -676,12 +685,19 @@ impl Image {
             return Ok(0);
         }
 
-        let width = self.width() as i32;
+        let width = self.width() as usize;
+        let (left, right) = (left as usize, right as usize);
+        let mut covered = 0usize;
 
-        Ok((top..bottom)
-            .flat_map(|y| left + y * width..right + y * width)
-            .filter(|&x| self.buffer.at(x as usize).a > 0.0)
-            .count())
+        for row in top as usize..bottom as usize {
+            let row = self.buffer.row(row, width).crop(left, right);
+
+            for color in row.iter() {
+                covered += (color.a > 0.0) as usize;
+            }
+        }
+
+        Ok(covered)
     }
 
     pub fn write(&self, output: &path::Path) -> Result<()> {

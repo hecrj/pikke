@@ -323,6 +323,29 @@ impl UserData for Color {
 }
 
 #[derive(Debug, Clone)]
+pub struct Row<'a> {
+    r: &'a [f32],
+    g: &'a [f32],
+    b: &'a [f32],
+    a: &'a [f32],
+}
+
+impl Row<'_> {
+    pub fn crop(&self, left: usize, right: usize) -> Self {
+        Self {
+            r: &self.r[left..right],
+            g: &self.g[left..right],
+            b: &self.b[left..right],
+            a: &self.a[left..right],
+        }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = Color<Linear, Premultiplied>> {
+        iter(self.r, self.g, self.b, self.a)
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct Buffer {
     r: Vec<f32>,
     g: Vec<f32>,
@@ -366,12 +389,22 @@ impl Buffer {
         Color::from_rgba([self.r[i], self.g[i], self.b[i], self.a[i]])
     }
 
+    pub fn row(&self, row: usize, width: usize) -> Row<'_> {
+        let (start, end) = (row * width, (row + 1) * width);
+
+        Row {
+            r: &self.r[start..end],
+            g: &self.g[start..end],
+            b: &self.b[start..end],
+            a: &self.a[start..end],
+        }
+    }
+
     pub fn luma(&self) -> (f32, f32) {
         let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
-        let count = self.r.len();
 
-        for i in 0..count {
-            let luma = self.at(i).luma();
+        for color in self.iter() {
+            let luma = color.luma();
             lo = lo.min(luma);
             hi = hi.max(luma);
         }
@@ -432,6 +465,67 @@ impl Buffer {
             self.b[i] = b;
             self.a[i] = a;
         }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = Color<Linear, Premultiplied>> {
+        iter(&self.r, &self.g, &self.b, &self.a)
+    }
+}
+
+fn iter(
+    r: &[f32],
+    g: &[f32],
+    b: &[f32],
+    a: &[f32],
+) -> impl Iterator<Item = Color<Linear, Premultiplied>> {
+    struct Iter {
+        r: *const f32,
+        g: *const f32,
+        b: *const f32,
+        a: *const f32,
+        remaining: usize,
+    }
+
+    impl Iterator for Iter {
+        type Item = Color<Linear, Premultiplied>;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            if self.remaining == 0 {
+                return None;
+            }
+
+            self.remaining -= 1;
+
+            Some(unsafe {
+                let color = Color {
+                    r: *self.r,
+                    g: *self.g,
+                    b: *self.b,
+                    a: *self.a,
+                    _space: PhantomData,
+                    _alpha: PhantomData,
+                };
+
+                self.r = self.r.add(1);
+                self.g = self.g.add(1);
+                self.b = self.b.add(1);
+                self.a = self.a.add(1);
+
+                color
+            })
+        }
+    }
+
+    debug_assert_eq!(r.len(), g.len());
+    debug_assert_eq!(r.len(), b.len());
+    debug_assert_eq!(r.len(), a.len());
+
+    Iter {
+        r: r.as_ptr(),
+        g: g.as_ptr(),
+        b: b.as_ptr(),
+        a: a.as_ptr(),
+        remaining: r.len(),
     }
 }
 
