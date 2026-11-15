@@ -694,8 +694,86 @@ pub fn resize(
     }
 }
 
+struct Taps {
+    starts: Vec<usize>,
+    counts: Vec<usize>,
+    stride: usize,
+    weights: Vec<f32>,
+    sums: Vec<f32>,
+}
+
+fn taps(kernel: impl Fn(f64) -> f64, support: f64, src_len: usize, dst_len: usize) -> Taps {
+    let scale = src_len as f64 / dst_len as f64;
+    let filterscale = scale.max(1.0);
+    let support = support * filterscale;
+
+    let mut starts = Vec::with_capacity(dst_len);
+    let mut counts = Vec::with_capacity(dst_len);
+    for i in 0..dst_len {
+        let center = (i as f64 + 0.5) * scale;
+        let start = (center - support + 0.5).trunc().clamp(0.0, src_len as f64) as usize;
+        let end = (center + support + 0.5).trunc().clamp(0.0, src_len as f64) as usize;
+        starts.push(start);
+        counts.push(end - start);
+    }
+
+    let stride = counts.iter().copied().max().unwrap_or(0);
+    let mut weights = vec![0.0f32; dst_len * stride];
+    let mut sums = vec![0.0f32; dst_len];
+    for i in 0..dst_len {
+        let center = (i as f64 + 0.5) * scale;
+        let mut sum = 0.0f32;
+        for (k, j) in (starts[i]..starts[i] + counts[i]).enumerate() {
+            let w = kernel((j as f64 + 0.5 - center) / filterscale) as f32;
+            weights[i * stride + k] = w;
+            sum += w;
+        }
+        sums[i] = sum;
+    }
+
+    Taps {
+        starts,
+        counts,
+        stride,
+        weights,
+        sums,
+    }
+}
+
+struct CubicTaps {
+    n: usize,
+    starts: Vec<usize>,
+    weights: Vec<f32>,
+}
+
+fn cubic_taps(src_len: usize, dst_len: usize) -> CubicTaps {
+    let scale = src_len as f64 / dst_len as f64;
+    let n = (scale as usize).clamp(1, 5);
+    let u_dx = scale / n as f64;
+    let taps_per = 4 * n;
+
+    let mut starts = vec![0usize; dst_len * taps_per];
+    let mut weights = vec![0.0f32; dst_len * taps_per];
+    for i in 0..dst_len {
+        let x0 = (i as f64 + 0.5) * scale - (scale - u_dx) / 2.0;
+        for j in 0..n {
+            let shifted = x0 + j as f64 * u_dx - 0.5;
+            let ix = shifted.floor() as i64;
+            let frac = shifted - ix as f64;
+            for d in -1..=2i64 {
+                let t = (ix + d).clamp(0, (src_len - 1) as i64) as usize;
+                let slot = i * taps_per + j * 4 + (d + 1) as usize;
+                starts[slot] = t;
+                weights[slot] = cubic(frac - d as f64) as f32;
+            }
+        }
+    }
+
+    CubicTaps { n, starts, weights }
+}
+
 fn resample(
-    kernel: impl Fn(f64) -> f64 + Sync,
+    kernel: impl Fn(f64) -> f64,
     support: f64,
     src: &[f32],
     src_w: u16,
@@ -703,65 +781,6 @@ fn resample(
     dst_w: u16,
     dst_h: u16,
 ) -> Vec<f32> {
-    fn pass(
-        src: &[f32],
-        src_stride: usize,
-        out: &mut [f32],
-        dst_stride: usize,
-        src_len: usize,
-        dst_len: usize,
-        kernel: impl Fn(f64) -> f64,
-        support: f64,
-    ) {
-        let scale = src_len as f64 / dst_len as f64;
-        let filterscale = scale.max(1.0);
-        let support = support * filterscale;
-
-        for i in 0..dst_len {
-            let center = (i as f64 + 0.5) * scale;
-            let start = (center - support + 0.5).trunc().clamp(0.0, src_len as f64) as usize;
-            let end = (center + support + 0.5).trunc().clamp(0.0, src_len as f64) as usize;
-
-            let mut acc = 0.0f32;
-            let mut weights = 0.0f32;
-            for j in start..end {
-                let w = kernel((j as f64 + 0.5 - center) / filterscale) as f32;
-                acc += w * src[j * src_stride];
-                weights += w;
-            }
-            out[i * dst_stride] = if weights == 0.0 { 0.0 } else { acc / weights };
-        }
-    }
-
-    fn pass_row(
-        src: &[f32],
-        src_w: usize,
-        y: usize,
-        out_row: &mut [f32],
-        src_h: usize,
-        dst_h: usize,
-        kernel: impl Fn(f64) -> f64,
-        support: f64,
-    ) {
-        let scale = src_h as f64 / dst_h as f64;
-        let filterscale = scale.max(1.0);
-        let support = support * filterscale;
-        let center = (y as f64 + 0.5) * scale;
-        let start = (center - support + 0.5).trunc().clamp(0.0, src_h as f64) as usize;
-        let end = (center + support + 0.5).trunc().clamp(0.0, src_h as f64) as usize;
-
-        for x in 0..out_row.len() {
-            let mut acc = 0.0f32;
-            let mut weights = 0.0f32;
-            for t in start..end {
-                let w = kernel((t as f64 + 0.5 - center) / filterscale) as f32;
-                acc += w * src[t * src_w + x];
-                weights += w;
-            }
-            out_row[x] = if weights == 0.0 { 0.0 } else { acc / weights };
-        }
-    }
-
     let (sw, sh, dw, dh) = (
         src_w as usize,
         src_h as usize,
@@ -774,10 +793,11 @@ fn resample(
     }
 
     let mut across = vec![0.0f32; dw * sh];
-
     if dw == sw {
         across.copy_from_slice(src);
     } else {
+        let columns = taps(&kernel, support, sw, dw);
+
         #[cfg(feature = "multithreading")]
         let iter = src.par_chunks(sw).zip(across.par_chunks_mut(dw));
 
@@ -785,80 +805,15 @@ fn resample(
         let iter = src.chunks(sw).zip(across.chunks_mut(dw));
 
         iter.for_each(|(in_row, out_row)| {
-            pass(in_row, 1, out_row, 1, sw, dw, &kernel, support);
+            pass(in_row, out_row, &columns);
         });
     }
 
-    let mut out = vec![0.0f32; dw * dh];
     if dh == sh {
-        out.copy_from_slice(&across);
-    } else {
-        #[cfg(feature = "multithreading")]
-        let iter = out.par_chunks_mut(dw);
-
-        #[cfg(not(feature = "multithreading"))]
-        let iter = out.chunks_mut(dw);
-
-        iter.enumerate().for_each(|(y, out_row)| {
-            pass_row(&across, dw, y, out_row, sh, dh, &kernel, support);
-        });
+        return across;
     }
 
-    out
-}
-
-fn resample_cubic(src: &[f32], src_w: u16, src_h: u16, dst_w: u16, dst_h: u16) -> Vec<f32> {
-    fn pass_cubic_row(
-        src: &[f32],
-        src_w: usize,
-        y: usize,
-        out_row: &mut [f32],
-        src_h: usize,
-        dst_h: usize,
-    ) {
-        let scale = src_h as f64 / dst_h as f64;
-        let n = (scale as usize).clamp(1, 5);
-        let u_dx = scale / n as f64;
-        let x0 = (y as f64 + 0.5) * scale - (scale - u_dx) / 2.0;
-
-        for x in 0..out_row.len() {
-            let mut acc = 0.0f32;
-            for j in 0..n {
-                let shifted = x0 + j as f64 * u_dx - 0.5;
-                let ix = shifted.floor() as i64;
-                let frac = shifted - ix as f64;
-                for d in -1..=2i64 {
-                    let t = (ix + d).clamp(0, (src_h - 1) as i64) as usize;
-                    acc += cubic(frac - d as f64) as f32 * src[t * src_w + x];
-                }
-            }
-            out_row[x] = acc / n as f32;
-        }
-    }
-
-    let (sw, sh, dw, dh) = (
-        src_w as usize,
-        src_h as usize,
-        dst_w as usize,
-        dst_h as usize,
-    );
-
-    if dw == 0 {
-        return Vec::new();
-    }
-
-    let mut across = vec![0.0f32; dw * sh];
-
-    #[cfg(feature = "multithreading")]
-    let iter = src.par_chunks(sw).zip(across.par_chunks_mut(dw));
-
-    #[cfg(not(feature = "multithreading"))]
-    let iter = src.chunks(sw).zip(across.chunks_mut(dw));
-
-    iter.for_each(|(in_row, out_row)| {
-        pass_cubic(in_row, 1, out_row, 1, sw, dw);
-    });
-
+    let rows = taps(&kernel, support, sh, dh);
     let mut out = vec![0.0f32; dw * dh];
 
     #[cfg(feature = "multithreading")]
@@ -868,37 +823,112 @@ fn resample_cubic(src: &[f32], src_w: u16, src_h: u16, dst_w: u16, dst_h: u16) -
     let iter = out.chunks_mut(dw);
 
     iter.enumerate().for_each(|(y, out_row)| {
-        pass_cubic_row(&across, dw, y, out_row, sh, dh);
+        resample_row(out_row, &across, dw, y, &rows);
     });
 
     out
 }
 
-fn pass_cubic(
-    src: &[f32],
-    src_stride: usize,
-    out: &mut [f32],
-    dst_stride: usize,
-    src_len: usize,
-    dst_len: usize,
-) {
-    let scale = src_len as f64 / dst_len as f64;
-    let n = (scale as usize).clamp(1, 5);
-    let u_dx = scale / n as f64;
-
-    for i in 0..dst_len {
-        let x0 = (i as f64 + 0.5) * scale - (scale - u_dx) / 2.0;
+fn pass(src: &[f32], out: &mut [f32], taps: &Taps) {
+    for i in 0..out.len() {
+        let start = taps.starts[i];
+        let weights = &taps.weights[i * taps.stride..i * taps.stride + taps.counts[i]];
+        let values = &src[start..start + taps.counts[i]];
         let mut acc = 0.0f32;
-        for j in 0..n {
-            let shifted = x0 + j as f64 * u_dx - 0.5;
-            let ix = shifted.floor() as i64;
-            let frac = shifted - ix as f64;
-            for d in -1..=2i64 {
-                let t = (ix + d).clamp(0, (src_len - 1) as i64) as usize;
-                acc += cubic(frac - d as f64) as f32 * src[t * src_stride];
-            }
+        for (w, v) in weights.iter().zip(values) {
+            acc += w * v;
         }
-        out[i * dst_stride] = acc / n as f32;
+        let sum = taps.sums[i];
+        out[i] = if sum == 0.0 { 0.0 } else { acc / sum };
+    }
+}
+
+fn resample_row(out_row: &mut [f32], src: &[f32], src_w: usize, y: usize, taps: &Taps) {
+    let start = taps.starts[y];
+    let weights = &taps.weights[y * taps.stride..y * taps.stride + taps.counts[y]];
+    for (k, w) in weights.iter().enumerate() {
+        let row = &src[(start + k) * src_w..(start + k + 1) * src_w];
+        for (o, v) in out_row.iter_mut().zip(row) {
+            *o += w * v;
+        }
+    }
+    let sum = taps.sums[y];
+    if sum == 0.0 {
+        out_row.fill(0.0);
+    } else {
+        for o in out_row.iter_mut() {
+            *o /= sum;
+        }
+    }
+}
+
+fn resample_cubic(src: &[f32], src_w: u16, src_h: u16, dst_w: u16, dst_h: u16) -> Vec<f32> {
+    let (sw, sh, dw, dh) = (
+        src_w as usize,
+        src_h as usize,
+        dst_w as usize,
+        dst_h as usize,
+    );
+
+    if dw == 0 {
+        return Vec::new();
+    }
+
+    let columns = cubic_taps(sw, dw);
+    let mut across = vec![0.0f32; dw * sh];
+
+    #[cfg(feature = "multithreading")]
+    let iter = src.par_chunks(sw).zip(across.par_chunks_mut(dw));
+
+    #[cfg(not(feature = "multithreading"))]
+    let iter = src.chunks(sw).zip(across.chunks_mut(dw));
+
+    iter.for_each(|(in_row, out_row)| {
+        pass_cubic(in_row, out_row, &columns);
+    });
+
+    let rows = cubic_taps(sh, dh);
+    let mut out = vec![0.0f32; dw * dh];
+
+    #[cfg(feature = "multithreading")]
+    let iter = out.par_chunks_mut(dw);
+
+    #[cfg(not(feature = "multithreading"))]
+    let iter = out.chunks_mut(dw);
+
+    iter.enumerate().for_each(|(y, out_row)| {
+        resample_cubic_row(out_row, &across, dw, y, &rows);
+    });
+
+    out
+}
+
+fn pass_cubic(src: &[f32], out: &mut [f32], taps: &CubicTaps) {
+    let taps_per = 4 * taps.n;
+    for (i, value) in out.iter_mut().enumerate() {
+        let base = i * taps_per;
+        let mut acc = 0.0f32;
+        for k in 0..taps_per {
+            acc += taps.weights[base + k] * src[taps.starts[base + k]];
+        }
+        *value = acc / taps.n as f32;
+    }
+}
+
+fn resample_cubic_row(out_row: &mut [f32], src: &[f32], src_w: usize, y: usize, taps: &CubicTaps) {
+    let taps_per = 4 * taps.n;
+    let base = y * taps_per;
+    for k in 0..taps_per {
+        let start = taps.starts[base + k];
+        let row = &src[start * src_w..(start + 1) * src_w];
+        let w = taps.weights[base + k];
+        for (o, v) in out_row.iter_mut().zip(row) {
+            *o += w * v;
+        }
+    }
+    let divisor = taps.n as f32;
+    for o in out_row.iter_mut() {
+        *o /= divisor;
     }
 }
 
