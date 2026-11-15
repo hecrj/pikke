@@ -136,6 +136,9 @@ impl Engine {
                         .expect("video type must be set")
                         .push(&frame)?;
 
+                    lua.gc_collect()?;
+                    lua.gc_collect()?;
+
                     Ok(())
                 })?,
         )?;

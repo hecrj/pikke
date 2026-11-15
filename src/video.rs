@@ -53,12 +53,13 @@ impl Video {
                     return Err(Error::OddDimensions { width, height });
                 }
 
-                let (sender, receiver) = mpsc::sync_channel(2);
-                sender.send(Some(first.clone())).map_err(io::Error::other)?;
-                sender.send(Some(frame.clone())).map_err(io::Error::other)?;
+                let (sender, receiver) = mpsc::sync_channel(1);
 
                 let output = self.output.clone();
                 let handle = thread::spawn(move || worker(output, receiver));
+
+                sender.send(Some(first.clone())).map_err(io::Error::other)?;
+                sender.send(Some(frame.clone())).map_err(io::Error::other)?;
 
                 self.state = State::Encoding { sender, handle }
             }
@@ -128,6 +129,11 @@ fn worker(output: PathBuf, receiver: mpsc::Receiver<Option<Image>>) -> Result<()
             "-f",
             "mp4",
         ])
+        .arg("-x264-params")
+        .arg(format!(
+            "threads={}",
+            (rayon::current_num_threads() / 4).clamp(2, 8)
+        ))
         .arg(&temp)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
