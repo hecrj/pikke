@@ -2,6 +2,12 @@ use std::marker::PhantomData;
 
 use mlua::{Lua, Table, UserData, UserDataFields, UserDataMethods, Value};
 
+#[cfg(feature = "multithreading")]
+use rayon::iter::{IndexedParallelIterator, ParallelIterator};
+
+#[cfg(feature = "multithreading")]
+use rayon::slice::{ParallelSlice, ParallelSliceMut};
+
 use crate::lua;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -689,7 +695,7 @@ pub fn resize(
 }
 
 fn resample(
-    kernel: impl Fn(f64) -> f64,
+    kernel: impl Fn(f64) -> f64 + Sync,
     support: f64,
     src: &[f32],
     src_w: u16,
@@ -727,6 +733,35 @@ fn resample(
         }
     }
 
+    fn pass_row(
+        src: &[f32],
+        src_w: usize,
+        y: usize,
+        out_row: &mut [f32],
+        src_h: usize,
+        dst_h: usize,
+        kernel: impl Fn(f64) -> f64,
+        support: f64,
+    ) {
+        let scale = src_h as f64 / dst_h as f64;
+        let filterscale = scale.max(1.0);
+        let support = support * filterscale;
+        let center = (y as f64 + 0.5) * scale;
+        let start = (center - support + 0.5).trunc().clamp(0.0, src_h as f64) as usize;
+        let end = (center + support + 0.5).trunc().clamp(0.0, src_h as f64) as usize;
+
+        for x in 0..out_row.len() {
+            let mut acc = 0.0f32;
+            let mut weights = 0.0f32;
+            for t in start..end {
+                let w = kernel((t as f64 + 0.5 - center) / filterscale) as f32;
+                acc += w * src[t * src_w + x];
+                weights += w;
+            }
+            out_row[x] = if weights == 0.0 { 0.0 } else { acc / weights };
+        }
+    }
+
     let (sw, sh, dw, dh) = (
         src_w as usize,
         src_h as usize,
@@ -734,46 +769,73 @@ fn resample(
         dst_h as usize,
     );
 
+    if dw == 0 {
+        return Vec::new();
+    }
+
     let mut across = vec![0.0f32; dw * sh];
+
     if dw == sw {
         across.copy_from_slice(src);
     } else {
-        for y in 0..sh {
-            pass(
-                &src[y * sw..(y + 1) * sw],
-                1,
-                &mut across[y * dw..(y + 1) * dw],
-                1,
-                sw,
-                dw,
-                &kernel,
-                support,
-            );
-        }
+        #[cfg(feature = "multithreading")]
+        let iter = src.par_chunks(sw).zip(across.par_chunks_mut(dw));
+
+        #[cfg(not(feature = "multithreading"))]
+        let iter = src.chunks(sw).zip(across.chunks_mut(dw));
+
+        iter.for_each(|(in_row, out_row)| {
+            pass(in_row, 1, out_row, 1, sw, dw, &kernel, support);
+        });
     }
 
     let mut out = vec![0.0f32; dw * dh];
     if dh == sh {
         out.copy_from_slice(&across);
     } else {
-        for x in 0..dw {
-            pass(
-                &across[x..],
-                dw,
-                &mut out[x..],
-                dw,
-                sh,
-                dh,
-                &kernel,
-                support,
-            );
-        }
+        #[cfg(feature = "multithreading")]
+        let iter = out.par_chunks_mut(dw);
+
+        #[cfg(not(feature = "multithreading"))]
+        let iter = out.chunks_mut(dw);
+
+        iter.enumerate().for_each(|(y, out_row)| {
+            pass_row(&across, dw, y, out_row, sh, dh, &kernel, support);
+        });
     }
 
     out
 }
 
 fn resample_cubic(src: &[f32], src_w: u16, src_h: u16, dst_w: u16, dst_h: u16) -> Vec<f32> {
+    fn pass_cubic_row(
+        src: &[f32],
+        src_w: usize,
+        y: usize,
+        out_row: &mut [f32],
+        src_h: usize,
+        dst_h: usize,
+    ) {
+        let scale = src_h as f64 / dst_h as f64;
+        let n = (scale as usize).clamp(1, 5);
+        let u_dx = scale / n as f64;
+        let x0 = (y as f64 + 0.5) * scale - (scale - u_dx) / 2.0;
+
+        for x in 0..out_row.len() {
+            let mut acc = 0.0f32;
+            for j in 0..n {
+                let shifted = x0 + j as f64 * u_dx - 0.5;
+                let ix = shifted.floor() as i64;
+                let frac = shifted - ix as f64;
+                for d in -1..=2i64 {
+                    let t = (ix + d).clamp(0, (src_h - 1) as i64) as usize;
+                    acc += cubic(frac - d as f64) as f32 * src[t * src_w + x];
+                }
+            }
+            out_row[x] = acc / n as f32;
+        }
+    }
+
     let (sw, sh, dw, dh) = (
         src_w as usize,
         src_h as usize,
@@ -781,22 +843,33 @@ fn resample_cubic(src: &[f32], src_w: u16, src_h: u16, dst_w: u16, dst_h: u16) -
         dst_h as usize,
     );
 
-    let mut across = vec![0.0f32; dw * sh];
-    for y in 0..sh {
-        pass_cubic(
-            &src[y * sw..(y + 1) * sw],
-            1,
-            &mut across[y * dw..(y + 1) * dw],
-            1,
-            sw,
-            dw,
-        );
+    if dw == 0 {
+        return Vec::new();
     }
 
+    let mut across = vec![0.0f32; dw * sh];
+
+    #[cfg(feature = "multithreading")]
+    let iter = src.par_chunks(sw).zip(across.par_chunks_mut(dw));
+
+    #[cfg(not(feature = "multithreading"))]
+    let iter = src.chunks(sw).zip(across.chunks_mut(dw));
+
+    iter.for_each(|(in_row, out_row)| {
+        pass_cubic(in_row, 1, out_row, 1, sw, dw);
+    });
+
     let mut out = vec![0.0f32; dw * dh];
-    for x in 0..dw {
-        pass_cubic(&across[x..], dw, &mut out[x..], dw, sh, dh);
-    }
+
+    #[cfg(feature = "multithreading")]
+    let iter = out.par_chunks_mut(dw);
+
+    #[cfg(not(feature = "multithreading"))]
+    let iter = out.chunks_mut(dw);
+
+    iter.enumerate().for_each(|(y, out_row)| {
+        pass_cubic_row(&across, dw, y, out_row, sh, dh);
+    });
 
     out
 }
