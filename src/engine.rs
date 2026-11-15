@@ -94,6 +94,10 @@ impl Engine {
             .unwrap_or_else(|| default_output(&script));
         let video = output.with_extension("mp4");
 
+        if let Some(parent) = output.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
         let mut frame_number = 0;
         let mut dimensions = None;
 

@@ -68,6 +68,7 @@ fn run() -> Result<()> {
     let engine = Engine::load(script, scale)?;
 
     let mut show_help = false;
+    let mut stdin = false;
     let mut must_watch = false;
     let mut output = None;
     let mut values = BTreeMap::new();
@@ -76,6 +77,9 @@ fn run() -> Result<()> {
         match arg.as_str() {
             "--help" => {
                 show_help = true;
+            }
+            "--stdin" => {
+                stdin = true;
             }
             "--watch" => {
                 must_watch = true;
@@ -117,6 +121,10 @@ fn run() -> Result<()> {
         return Ok(());
     }
 
+    if stdin {
+        return batch(engine, io::stdin());
+    }
+
     let arguments: Vec<_> = engine
         .arguments()
         .iter()
@@ -148,7 +156,7 @@ fn run() -> Result<()> {
     engine.run(&arguments, output)?;
 
     if must_watch {
-        watch(script, scale, &arguments, output)?;
+        return watch(script, scale, &arguments, output);
     }
 
     Ok(())
@@ -167,6 +175,7 @@ Arguments:
 Options:
   --scale <s>       The run's scale (default 1)
   --output <path>   The still's path; the video is the same path as .mp4 (default <script>.png)
+  --stdin           Read jobs from stdin, one JSON object per line
   --help            Print this help",
     );
 
@@ -186,10 +195,70 @@ Options:
     }
 
     help.push_str(
-        "\nAn omitted or empty option binds nil; values are strings (the\nscript converts where it needs a number).",
+        "\nAn omitted or empty option binds nil.\n\n\
+        A --stdin job is a JSON object per line: its keys bind the\n\
+        options as strings, numbers, or null.",
     );
 
     help
+}
+
+fn batch(engine: Engine, input: impl io::Read) -> Result<()> {
+    use io::BufRead;
+
+    let reader = io::BufReader::new(input);
+    let mut lines = reader.lines();
+
+    while let Some(work) = lines.next().transpose()? {
+        let work = work.trim();
+
+        if work.is_empty() {
+            continue;
+        }
+
+        let mut values: serde_json::Map<String, serde_json::Value> = serde_json::from_str(work)?;
+
+        for key in values.keys() {
+            if key != "output" && !engine.arguments().contains(key) {
+                return Err(Error::OptionUnknown {
+                    option: key.clone(),
+                });
+            }
+        }
+
+        let output = values
+            .remove("output")
+            .as_ref()
+            .and_then(serde_json::Value::as_str)
+            .map(std::path::PathBuf::from)
+            .ok_or_else(|| Error::NoBatchOutput(work.to_owned()))?;
+
+        let arguments: Vec<_> = values
+            .into_iter()
+            .map(|(key, value)| argument(&key, value))
+            .collect::<Result<_>>()?;
+
+        engine.run(&arguments, Some(&output))?;
+    }
+
+    Ok(())
+}
+
+fn argument(key: &str, value: serde_json::Value) -> Result<(String, Option<String>)> {
+    let value = match value {
+        serde_json::Value::String(value) => Some(value),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        serde_json::Value::Null => None,
+        value => {
+            return Err(Error::OptionInvalidValue {
+                option: key.to_owned(),
+                value: value.to_string(),
+                note: "must be a string, number, or null".to_owned(),
+            });
+        }
+    };
+
+    Ok((key.to_owned(), value))
 }
 
 fn watch(
@@ -242,5 +311,34 @@ fn watch(
         let _ = Engine::load(script, scale)
             .and_then(|engine| engine.run(arguments, output))
             .inspect_err(|error| eprintln!("error running {}: {error}", script.display()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::argument;
+    use pikke::Error;
+
+    #[test]
+    fn the_argument_binds_strings_numbers_and_null() {
+        assert_eq!(
+            argument("tint", serde_json::Value::String("1".to_owned())).unwrap(),
+            ("tint".to_owned(), Some("1".to_owned()))
+        );
+        assert_eq!(
+            argument("size", serde_json::Value::Number(2.into())).unwrap(),
+            ("size".to_owned(), Some("2".to_owned()))
+        );
+        assert_eq!(
+            argument("tint", serde_json::Value::Null).unwrap(),
+            ("tint".to_owned(), None)
+        );
+    }
+
+    #[test]
+    fn the_argument_rejects_other_value_types() {
+        let error = argument("tint", serde_json::Value::Bool(true)).unwrap_err();
+
+        assert!(matches!(error, Error::OptionInvalidValue { .. }), "{error}");
     }
 }

@@ -70,6 +70,10 @@ pub enum Error {
     },
     #[error("failed create file watcher: {0}")]
     WatcherFailed(Arc<notify::Error>),
+    #[error("invalid batch json: {0}")]
+    InvalidBatch(Arc<serde_json::Error>),
+    #[error("batch has no explicit output: {0}")]
+    NoBatchOutput(String),
 }
 
 impl From<image::ImageError> for Error {
@@ -99,5 +103,11 @@ impl From<Error> for mlua::Error {
 impl From<notify::Error> for Error {
     fn from(error: notify::Error) -> Self {
         Self::WatcherFailed(Arc::new(error))
+    }
+}
+
+impl From<serde_json::Error> for Error {
+    fn from(error: serde_json::Error) -> Self {
+        Self::InvalidBatch(Arc::new(error))
     }
 }
