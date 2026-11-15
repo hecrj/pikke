@@ -213,6 +213,7 @@ fn batch(
     use std::cell::OnceCell;
     use std::io::BufRead;
     use std::path::PathBuf;
+    use std::sync::mpsc;
     use std::sync::{Arc, Mutex};
     use std::thread_local;
 
@@ -226,6 +227,13 @@ fn batch(
     let errors = Arc::new(Mutex::new(Vec::new()));
 
     rayon::scope(|scope| {
+        let max_in_flight = 4 * rayon::current_num_threads();
+        let (sender, permits) = mpsc::sync_channel(max_in_flight);
+
+        for _ in 0..max_in_flight {
+            let _ = sender.send(());
+        }
+
         while let Some(job) = lines.next().transpose()? {
             let job = job.trim();
 
@@ -233,10 +241,12 @@ fn batch(
                 continue;
             }
 
+            let _ = permits.recv();
             let script = script.to_owned();
             let job = job.to_owned();
             let arguments = arguments.clone();
             let errors = errors.clone();
+            let sender = sender.clone();
 
             fn work(script: PathBuf, arguments: &[String], scale: f32, job: &str) -> Result<()> {
                 let mut values: serde_json::Map<String, serde_json::Value> =
@@ -279,6 +289,8 @@ fn batch(
                         .expect("lock errors")
                         .push((job.clone(), error));
                 }
+
+                let _ = sender.send(());
             });
         }
 
