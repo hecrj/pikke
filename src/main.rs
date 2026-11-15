@@ -122,7 +122,8 @@ fn run() -> Result<()> {
     }
 
     if stdin {
-        return batch(engine, io::stdin());
+        let arguments = engine.arguments();
+        return batch(script, scale, arguments, io::stdin());
     }
 
     let arguments: Vec<_> = engine
@@ -203,42 +204,99 @@ Options:
     help
 }
 
-fn batch(engine: Engine, input: impl io::Read) -> Result<()> {
-    use io::BufRead;
+fn batch(
+    script: &std::path::Path,
+    scale: f32,
+    arguments: &[String],
+    input: impl io::Read + Send,
+) -> Result<()> {
+    use std::cell::OnceCell;
+    use std::io::BufRead;
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+    use std::thread_local;
+
+    thread_local! {
+        static ENGINE: OnceCell<Result<Engine>> = const { OnceCell::new() };
+    }
 
     let reader = io::BufReader::new(input);
     let mut lines = reader.lines();
+    let arguments: Arc<[String]> = Arc::from(arguments);
+    let errors = Arc::new(Mutex::new(Vec::new()));
 
-    while let Some(work) = lines.next().transpose()? {
-        let work = work.trim();
+    rayon::scope(|scope| {
+        while let Some(job) = lines.next().transpose()? {
+            let job = job.trim();
 
-        if work.is_empty() {
-            continue;
-        }
-
-        let mut values: serde_json::Map<String, serde_json::Value> = serde_json::from_str(work)?;
-
-        for key in values.keys() {
-            if key != "output" && !engine.arguments().contains(key) {
-                return Err(Error::OptionUnknown {
-                    option: key.clone(),
-                });
+            if job.is_empty() {
+                continue;
             }
+
+            let script = script.to_owned();
+            let job = job.to_owned();
+            let arguments = arguments.clone();
+            let errors = errors.clone();
+
+            fn work(script: PathBuf, arguments: &[String], scale: f32, job: &str) -> Result<()> {
+                let mut values: serde_json::Map<String, serde_json::Value> =
+                    serde_json::from_str(job)?;
+
+                for key in values.keys() {
+                    if key != "output" && !arguments.contains(key) {
+                        return Err(Error::OptionUnknown {
+                            option: key.clone(),
+                        });
+                    }
+                }
+
+                let output = values
+                    .remove("output")
+                    .as_ref()
+                    .and_then(serde_json::Value::as_str)
+                    .map(std::path::PathBuf::from)
+                    .ok_or_else(|| Error::NoBatchOutput(job.to_owned()))?;
+
+                let arguments: Vec<_> = values
+                    .into_iter()
+                    .map(|(key, value)| argument(&key, value))
+                    .collect::<Result<_>>()?;
+
+                ENGINE.with(|cell| {
+                    let engine = cell
+                        .get_or_init(|| Engine::load(script, scale))
+                        .as_ref()
+                        .map_err(Error::clone)?;
+
+                    engine.run(&arguments, Some(&output))
+                })
+            }
+
+            scope.spawn(move |_scope| {
+                if let Err(error) = work(script, &arguments, scale, &job) {
+                    errors
+                        .lock()
+                        .expect("lock errors")
+                        .push((job.clone(), error));
+                }
+            });
         }
 
-        let output = values
-            .remove("output")
-            .as_ref()
-            .and_then(serde_json::Value::as_str)
-            .map(std::path::PathBuf::from)
-            .ok_or_else(|| Error::NoBatchOutput(work.to_owned()))?;
+        Ok::<_, Error>(())
+    })?;
 
-        let arguments: Vec<_> = values
-            .into_iter()
-            .map(|(key, value)| argument(&key, value))
-            .collect::<Result<_>>()?;
+    let mut errors = errors.lock().expect("lock errors");
 
-        engine.run(&arguments, Some(&output))?;
+    if !errors.is_empty() {
+        let errors = std::mem::take(&mut *errors);
+
+        return Err(Error::BatchFailed(
+            errors
+                .into_iter()
+                .map(|(job, error)| format!("Job failed:\n{job}\nError: {error}"))
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        ));
     }
 
     Ok(())

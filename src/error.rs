@@ -74,6 +74,8 @@ pub enum Error {
     InvalidBatch(Arc<serde_json::Error>),
     #[error("batch has no explicit output: {0}")]
     NoBatchOutput(String),
+    #[error("some batch jobs have failed:\n{0}")]
+    BatchFailed(String),
 }
 
 impl From<image::ImageError> for Error {
