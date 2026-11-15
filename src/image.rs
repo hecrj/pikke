@@ -248,27 +248,47 @@ impl Image {
 
         let buffer = Arc::make_mut(&mut self.buffer);
 
-        for y in top..bottom {
-            for x in left..right {
-                let i = (y * self.viewport.width() as i32 + x) as usize;
-                let j = ((y - at_y) * other.viewport.width() as i32 + (x - at_x)) as usize;
+        let width = (right - left) as usize;
+        let layer_left = (left - at_x) as usize;
 
-                let base = buffer.at(i);
-                let layer = other.buffer.at(j);
+        match space {
+            color::Space::Linear => {
+                let self_width = self.viewport.width() as usize;
+                let other_width = other.width() as usize;
 
-                let blended = match space {
-                    color::Space::Linear => base.over(layer),
-                    color::Space::Srgb => base
-                        .demultiply()
-                        .to_srgb()
-                        .premultiply()
-                        .over(layer.demultiply().to_srgb().premultiply())
-                        .demultiply()
-                        .to_linear()
-                        .premultiply(),
-                };
+                for y in top..bottom {
+                    let layer = other.buffer.row((y - at_y) as usize, other_width);
+                    let layer = layer.crop(layer_left, layer_left + width);
 
-                buffer.put(i, blended);
+                    let base = buffer.row_mut(y as usize, self_width);
+                    base.crop(left as usize, right as usize).over(&layer);
+                }
+            }
+
+            color::Space::Srgb => {
+                let self_width = self.viewport.width() as i32;
+                let other_width = other.width() as i32;
+
+                for y in top..bottom {
+                    for x in left..right {
+                        let i = (y * self_width + x) as usize;
+                        let j = ((y - at_y) * other_width + (x - at_x)) as usize;
+
+                        let base = buffer.at(i);
+                        let layer = other.buffer.at(j);
+
+                        let blended = base
+                            .demultiply()
+                            .to_srgb()
+                            .premultiply()
+                            .over(layer.demultiply().to_srgb().premultiply())
+                            .demultiply()
+                            .to_linear()
+                            .premultiply();
+
+                        buffer.put(i, blended);
+                    }
+                }
             }
         }
 

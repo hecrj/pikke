@@ -351,6 +351,38 @@ impl Row<'_> {
     }
 }
 
+pub struct RowMut<'a> {
+    r: &'a mut [f32],
+    g: &'a mut [f32],
+    b: &'a mut [f32],
+    a: &'a mut [f32],
+}
+
+impl RowMut<'_> {
+    pub fn crop(self, left: usize, right: usize) -> Self {
+        Self {
+            r: &mut self.r[left..right],
+            g: &mut self.g[left..right],
+            b: &mut self.b[left..right],
+            a: &mut self.a[left..right],
+        }
+    }
+
+    fn iter_mut(&mut self) -> impl Iterator<Item = ColorMut<'_>> {
+        iter_mut(self.r, self.g, self.b, self.a)
+    }
+
+    pub fn over(&mut self, layer: &Row) {
+        for (base, layer) in self.iter_mut().zip(layer.iter()) {
+            let retain = 1.0 - layer.a;
+            *base.r = layer.r + *base.r * retain;
+            *base.g = layer.g + *base.g * retain;
+            *base.b = layer.b + *base.b * retain;
+            *base.a = layer.a + *base.a * retain;
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Buffer {
     r: Vec<f32>,
@@ -403,6 +435,17 @@ impl Buffer {
             g: &self.g[start..end],
             b: &self.b[start..end],
             a: &self.a[start..end],
+        }
+    }
+
+    pub fn row_mut(&mut self, row: usize, width: usize) -> RowMut<'_> {
+        let (start, end) = (row * width, (row + 1) * width);
+
+        RowMut {
+            r: &mut self.r[start..end],
+            g: &mut self.g[start..end],
+            b: &mut self.b[start..end],
+            a: &mut self.a[start..end],
         }
     }
 
@@ -478,12 +521,12 @@ impl Buffer {
     }
 }
 
-fn iter(
-    r: &[f32],
-    g: &[f32],
-    b: &[f32],
-    a: &[f32],
-) -> impl Iterator<Item = Color<Linear, Premultiplied>> {
+fn iter<'a>(
+    r: &'a [f32],
+    g: &'a [f32],
+    b: &'a [f32],
+    a: &'a [f32],
+) -> impl Iterator<Item = Color<Linear, Premultiplied>> + 'a {
     struct Iter {
         r: *const f32,
         g: *const f32,
@@ -532,6 +575,70 @@ fn iter(
         b: b.as_ptr(),
         a: a.as_ptr(),
         remaining: r.len(),
+    }
+}
+
+struct ColorMut<'a> {
+    pub r: &'a mut f32,
+    pub g: &'a mut f32,
+    pub b: &'a mut f32,
+    pub a: &'a mut f32,
+}
+
+fn iter_mut<'a>(
+    r: &'a mut [f32],
+    g: &'a mut [f32],
+    b: &'a mut [f32],
+    a: &'a mut [f32],
+) -> impl Iterator<Item = ColorMut<'a>> + 'a {
+    struct IterMut<'a> {
+        r: *mut f32,
+        g: *mut f32,
+        b: *mut f32,
+        a: *mut f32,
+        remaining: usize,
+        _borrow: PhantomData<&'a mut f32>,
+    }
+
+    impl<'a> Iterator for IterMut<'a> {
+        type Item = ColorMut<'a>;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            if self.remaining == 0 {
+                return None;
+            }
+
+            self.remaining -= 1;
+
+            Some(unsafe {
+                let color = ColorMut {
+                    r: &mut *self.r,
+                    g: &mut *self.g,
+                    b: &mut *self.b,
+                    a: &mut *self.a,
+                };
+
+                self.r = self.r.add(1);
+                self.g = self.g.add(1);
+                self.b = self.b.add(1);
+                self.a = self.a.add(1);
+
+                color
+            })
+        }
+    }
+
+    debug_assert_eq!(r.len(), g.len());
+    debug_assert_eq!(r.len(), b.len());
+    debug_assert_eq!(r.len(), a.len());
+
+    IterMut {
+        r: r.as_mut_ptr(),
+        g: g.as_mut_ptr(),
+        b: b.as_mut_ptr(),
+        a: a.as_mut_ptr(),
+        remaining: r.len(),
+        _borrow: PhantomData,
     }
 }
 
