@@ -250,43 +250,46 @@ impl Image {
 
         let width = (right - left) as usize;
         let layer_left = (left - at_x) as usize;
+        let self_width = self.viewport.width() as usize;
+        let other_width = other.width() as usize;
 
         match space {
             color::Space::Linear => {
-                let self_width = self.viewport.width() as usize;
-                let other_width = other.width() as usize;
-
                 for y in top..bottom {
                     let layer = other.buffer.row((y - at_y) as usize, other_width);
                     let layer = layer.crop(layer_left, layer_left + width);
 
-                    let base = buffer.row_mut(y as usize, self_width);
-                    base.crop(left as usize, right as usize).over(&layer);
+                    let mut base = buffer
+                        .row_mut(y as usize, self_width)
+                        .crop(left as usize, right as usize);
+
+                    for (mut base, layer) in base.iter_mut().zip(layer.iter()) {
+                        base.put(base.color().over(layer));
+                    }
                 }
             }
 
             color::Space::Srgb => {
-                let self_width = self.viewport.width() as i32;
-                let other_width = other.width() as i32;
-
                 for y in top..bottom {
-                    for x in left..right {
-                        let i = (y * self_width + x) as usize;
-                        let j = ((y - at_y) * other_width + (x - at_x)) as usize;
+                    let layer = other.buffer.row((y - at_y) as usize, other_width);
+                    let layer = layer.crop(layer_left, layer_left + width);
 
-                        let base = buffer.at(i);
-                        let layer = other.buffer.at(j);
+                    let mut base = buffer
+                        .row_mut(y as usize, self_width)
+                        .crop(left as usize, right as usize);
 
+                    for (mut base, layer) in base.iter_mut().zip(layer.iter()) {
                         let blended = base
+                            .color()
                             .demultiply()
-                            .to_srgb()
+                            .to_srgb_fast()
                             .premultiply()
-                            .over(layer.demultiply().to_srgb().premultiply())
+                            .over(layer.demultiply().to_srgb_fast().premultiply())
                             .demultiply()
-                            .to_linear()
+                            .to_linear_fast()
                             .premultiply();
 
-                        buffer.put(i, blended);
+                        base.put(blended);
                     }
                 }
             }
@@ -1860,11 +1863,11 @@ mod tests {
             let linear_expected = opaque.over(half);
             let srgb_expected = opaque
                 .demultiply()
-                .to_srgb()
+                .to_srgb_fast()
                 .premultiply()
-                .over(half.demultiply().to_srgb().premultiply())
+                .over(half.demultiply().to_srgb_fast().premultiply())
                 .demultiply()
-                .to_linear()
+                .to_linear_fast()
                 .premultiply();
             assert!((linear.buffer.at(i).r - linear_expected.r).abs() <= 1e-6);
             assert!((srgb.buffer.at(i).r - srgb_expected.r).abs() <= 1e-6);

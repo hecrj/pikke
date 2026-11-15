@@ -67,6 +67,18 @@ impl Color<Srgb> {
         }
     }
 
+    #[inline]
+    pub fn to_linear_fast(self) -> Color<Linear> {
+        Color {
+            r: srgb_to_linear_fast(self.r),
+            g: srgb_to_linear_fast(self.g),
+            b: srgb_to_linear_fast(self.b),
+            a: self.a,
+            _space: PhantomData,
+            _alpha: PhantomData,
+        }
+    }
+
     pub const fn to_pixel(self) -> Pixel {
         Pixel {
             r: encode_u8(self.r),
@@ -125,6 +137,18 @@ impl Color {
             r: linear_to_srgb(self.r),
             g: linear_to_srgb(self.g),
             b: linear_to_srgb(self.b),
+            a: self.a,
+            _space: PhantomData,
+            _alpha: PhantomData,
+        }
+    }
+
+    #[inline]
+    pub fn to_srgb_fast(self) -> Color<Srgb> {
+        Color {
+            r: linear_to_srgb_fast(self.r),
+            g: linear_to_srgb_fast(self.g),
+            b: linear_to_srgb_fast(self.b),
             a: self.a,
             _space: PhantomData,
             _alpha: PhantomData,
@@ -368,18 +392,8 @@ impl RowMut<'_> {
         }
     }
 
-    fn iter_mut(&mut self) -> impl Iterator<Item = ColorMut<'_>> {
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = ColorMut<'_>> {
         iter_mut(self.r, self.g, self.b, self.a)
-    }
-
-    pub fn over(&mut self, layer: &Row) {
-        for (base, layer) in self.iter_mut().zip(layer.iter()) {
-            let retain = 1.0 - layer.a;
-            *base.r = layer.r + *base.r * retain;
-            *base.g = layer.g + *base.g * retain;
-            *base.b = layer.b + *base.b * retain;
-            *base.a = layer.a + *base.a * retain;
-        }
     }
 }
 
@@ -578,11 +592,24 @@ fn iter<'a>(
     }
 }
 
-struct ColorMut<'a> {
-    pub r: &'a mut f32,
-    pub g: &'a mut f32,
-    pub b: &'a mut f32,
-    pub a: &'a mut f32,
+pub struct ColorMut<'a> {
+    r: &'a mut f32,
+    g: &'a mut f32,
+    b: &'a mut f32,
+    a: &'a mut f32,
+}
+
+impl ColorMut<'_> {
+    pub fn color(&self) -> Color<Linear, Premultiplied> {
+        Color::from_rgba([*self.r, *self.g, *self.b, *self.a])
+    }
+
+    pub fn put(&mut self, color: Color<Linear, Premultiplied>) {
+        *self.r = color.r;
+        *self.g = color.g;
+        *self.b = color.b;
+        *self.a = color.a;
+    }
 }
 
 fn iter_mut<'a>(
@@ -763,6 +790,49 @@ pub fn linear_to_srgb(linear: f32) -> f32 {
     } else {
         1.055 * linear.powf(1.0 / 2.4) - 0.055
     }
+}
+
+const ENCODE_COEFFICIENTS: [f32; 7] = [
+    -0.74088436,
+    2.7626574,
+    -4.2050004,
+    3.4330935,
+    -1.7671214,
+    1.5587507,
+    -0.041573964,
+];
+
+const DECODE_COEFFICIENTS: [f32; 7] = [
+    -0.051152304,
+    0.21590616,
+    -0.42192918,
+    0.7100482,
+    0.51325446,
+    0.032948937,
+    0.000919755,
+];
+
+#[inline]
+pub fn srgb_to_linear_fast(stored: f32) -> f32 {
+    let stored = stored.clamp(0.0, 1.0);
+    let exact = stored / 12.92;
+    let power = DECODE_COEFFICIENTS
+        .iter()
+        .fold(0.0, |value, &coefficient| value * stored + coefficient);
+    let blend = ((stored - 0.04045) * 500.0).clamp(0.0, 1.0);
+    exact + blend * (power - exact)
+}
+
+#[inline]
+pub fn linear_to_srgb_fast(linear: f32) -> f32 {
+    let linear = linear.clamp(0.0, 1.0);
+    let exact = linear * 12.92;
+    let root = linear.sqrt();
+    let power = ENCODE_COEFFICIENTS
+        .iter()
+        .fold(0.0, |value, &coefficient| value * root + coefficient);
+    let blend = ((linear - 0.0031308) * 500.0).clamp(0.0, 1.0);
+    exact + blend * (power - exact)
 }
 
 pub const fn invert(color: f32) -> f32 {
