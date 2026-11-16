@@ -56,6 +56,19 @@ impl Color<Srgb> {
         Self::from_pixel(Pixel::from_rgba8(rgba))
     }
 
+    pub const fn to_pixel(self) -> Pixel {
+        Pixel {
+            r: encode_u8(self.r),
+            g: encode_u8(self.g),
+            b: encode_u8(self.b),
+            a: encode_u8(self.a),
+        }
+    }
+
+    pub const fn to_rgba8(self) -> [u8; 4] {
+        self.to_pixel().to_rgba8()
+    }
+
     pub fn to_linear(self) -> Color<Linear> {
         Color {
             r: srgb_to_linear(self.r),
@@ -78,18 +91,20 @@ impl Color<Srgb> {
             _alpha: PhantomData,
         }
     }
+}
 
-    pub const fn to_pixel(self) -> Pixel {
-        Pixel {
-            r: encode_u8(self.r),
-            g: encode_u8(self.g),
-            b: encode_u8(self.b),
-            a: encode_u8(self.a),
+impl Color<Srgb, Premultiplied> {
+    pub const fn from_premultiplied_rgba8(rgba: [u8; 4]) -> Self {
+        let Color { r, g, b, a, .. } = Color::from_pixel(Pixel::from_rgba8(rgba));
+
+        Self {
+            r,
+            g,
+            b,
+            a,
+            _space: PhantomData,
+            _alpha: PhantomData,
         }
-    }
-
-    pub const fn to_rgba8(self) -> [u8; 4] {
-        self.to_pixel().to_rgba8()
     }
 }
 
@@ -435,6 +450,35 @@ impl Buffer {
         }
 
         Self { r, g, b, a }
+    }
+
+    pub fn from_premultiplied_rgba8(rgba: &[u8]) -> Self {
+        let count = rgba.len() / 4;
+
+        let (mut r, mut g, mut b, mut a) = (
+            Vec::with_capacity(count),
+            Vec::with_capacity(count),
+            Vec::with_capacity(count),
+            Vec::with_capacity(count),
+        );
+
+        for pixel in rgba.as_chunks::<4>().0 {
+            let color = Color::from_premultiplied_rgba8(*pixel)
+                .demultiply()
+                .to_linear()
+                .premultiply();
+
+            r.push(color.r);
+            g.push(color.g);
+            b.push(color.b);
+            a.push(color.a);
+        }
+
+        Self { r, g, b, a }
+    }
+
+    pub fn len(&self) -> usize {
+        self.r.len()
     }
 
     pub fn at(&self, i: usize) -> Color<Linear, Premultiplied> {
@@ -855,6 +899,13 @@ pub enum Space {
     #[default]
     Linear,
     Srgb,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Alpha {
+    #[default]
+    Straight,
+    Premultiplied,
 }
 
 pub fn resize(

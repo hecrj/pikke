@@ -3,9 +3,13 @@ use std::process::{Child, ChildStderr, Command, Stdio};
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 
-use mlua::{Lua, MetaMethod, ObjectLike, Table, UserData, UserDataFields, UserDataMethods, Value};
+use mlua::{
+    FromLua, Lua, MetaMethod, ObjectLike, Table, UserData, UserDataFields, UserDataMethods, Value,
+};
 
+use crate::color;
 use crate::image;
+use crate::lua;
 use crate::{Image, Result, Scale, Viewport};
 
 const STDERR_TAIL: usize = 1 << 20;
@@ -14,6 +18,7 @@ pub struct Stream {
     program: String,
     child: Child,
     viewport: Viewport,
+    alpha: color::Alpha,
     tail: Option<mpsc::Receiver<Vec<u8>>>,
     drain: Option<JoinHandle<()>>,
     buffer: Vec<u8>,
@@ -26,6 +31,7 @@ impl Stream {
         width: f32,
         height: f32,
         scale: Scale,
+        alpha: color::Alpha,
     ) -> Result<Stream> {
         let viewport = Viewport::from_logical(width, height, scale)?;
 
@@ -54,6 +60,7 @@ impl Stream {
             program,
             child,
             viewport,
+            alpha,
             tail: Some(tail),
             drain: Some(drain),
             buffer: vec![0; viewport.total_pixels() * 4],
@@ -92,7 +99,15 @@ impl Stream {
                     return Err(self.report(message).into());
                 }
                 Ok(count) if read + count == self.buffer.len() => {
-                    return Ok(Some(Image::from_rgba8(self.viewport, &self.buffer)?));
+                    return Ok(Some(Image::from_buffer(
+                        self.viewport,
+                        match self.alpha {
+                            color::Alpha::Straight => color::Buffer::from_rgba8(&self.buffer),
+                            color::Alpha::Premultiplied => {
+                                color::Buffer::from_premultiplied_rgba8(&self.buffer)
+                            }
+                        },
+                    )?));
                 }
                 Ok(count) => read += count,
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
@@ -175,24 +190,50 @@ fn drain_stderr(mut stderr: ChildStderr) -> (mpsc::Receiver<Vec<u8>>, JoinHandle
     (rx, drain)
 }
 
+fn field<V>(opts: Option<&Table>, name: &str) -> mlua::Result<Option<V>>
+where
+    V: FromLua,
+{
+    Ok(opts
+        .map(|opts| opts.get::<Option<V>>(name))
+        .transpose()?
+        .flatten())
+}
+
 pub fn install(lua: &Lua, env: &Table, scale: Scale) -> Result<()> {
     env.set(
         "stream",
         lua.create_function(
             move |_lua,
-                  (program, width, height, args): (String, f32, f32, Table)|
+                  (program, args, opts): (String, Table, Option<Table>)|
                   -> mlua::Result<Stream> {
-                if !width.is_finite() || width <= 0.0 {
+                let width = lua::number("stream", "width", field(opts.as_ref(), "width")?)?;
+                let height = lua::number("stream", "height", field(opts.as_ref(), "height")?)?;
+
+                if width <= 0.0 {
                     return Err(mlua::Error::RuntimeError(
-                        "stream: width must be a finite positive number".to_owned(),
+                        "stream: width must be a positive number".to_owned(),
                     ));
                 }
 
-                if !height.is_finite() || height <= 0.0 {
+                if height <= 0.0 {
                     return Err(mlua::Error::RuntimeError(
-                        "stream: height must be a finite positive number".to_owned(),
+                        "stream: height must be a positive number".to_owned(),
                     ));
                 }
+
+                let alpha: Option<String> = field(opts.as_ref(), "alpha")?;
+
+                let alpha = match alpha.as_deref() {
+                    None => color::Alpha::default(),
+                    Some("straight") => color::Alpha::Straight,
+                    Some("premultiplied") => color::Alpha::Premultiplied,
+                    _ => {
+                        return Err(mlua::Error::RuntimeError(
+                            "stream: alpha must be either straight or premultiplied".to_owned(),
+                        ));
+                    }
+                };
 
                 let mut argv = Vec::new();
 
@@ -230,7 +271,7 @@ pub fn install(lua: &Lua, env: &Table, scale: Scale) -> Result<()> {
                     }
                 }
 
-                Stream::spawn(program, argv, width, height, scale)
+                Stream::spawn(program, argv, width, height, scale, alpha)
                     .map_err(|error| mlua::Error::RuntimeError(error.to_string()))
             },
         )?,

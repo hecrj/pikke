@@ -58,8 +58,24 @@ if fail:
     sys.exit(3)
 ]]
 
+local premultiplied_producer = [[
+import sys
+
+args = sys.argv[1:]
+width = int(args[args.index("--width") + 1])
+height = int(args[args.index("--height") + 1])
+frames = int(args[args.index("--frames") + 1])
+
+out = sys.stdout.buffer
+out.write(bytes([128, 0, 0, 128]) * width * height * frames)
+out.flush()
+]]
+
 do
-  local stream = stream("python3", 100, 100, { "-c", producer, "--frames", 3 })
+  local stream = stream("python3", { "-c", producer, "--frames", 3 }, {
+    width = 100,
+    height = 100,
+  })
 
   for frame_number = 0, 2 do
     local frame = stream()
@@ -75,44 +91,81 @@ do
   end
 end
 
-must_fail("stream: width must be a finite positive number", function()
-  stream("python3", 0, 100, { "-c", producer })
+do
+  local stream = stream("python3", {
+    "-c",
+    premultiplied_producer,
+    "--frames",
+    "1",
+  }, { width = 4, height = 4, alpha = "premultiplied" })
+
+  local pixel = stream():pixel(1, 1)
+  assert(pixel.r == 255, pixel.r)
+  assert(pixel.g == 0, pixel.g)
+  assert(pixel.b == 0, pixel.b)
+  assert(pixel.a == 128, pixel.a)
+end
+
+do
+  local stream = stream("python3", {
+    "-c",
+    premultiplied_producer,
+    "--frames",
+    "1",
+  }, { width = 4, height = 4 })
+
+  local pixel = stream():pixel(1, 1)
+  assert(pixel.r == 128, pixel.r)
+  assert(pixel.g == 0, pixel.g)
+  assert(pixel.b == 0, pixel.b)
+  assert(pixel.a == 128, pixel.a)
+end
+
+must_fail("stream: width must be a positive number", function()
+  stream("python3", { "-c", producer }, { width = 0, height = 100 })
 end)
-must_fail("stream: height must be a finite positive number", function()
-  stream("python3", 100, 0, { "-c", producer })
+must_fail("stream: height must be a positive number", function()
+  stream("python3", { "-c", producer }, { width = 100, height = 0 })
 end)
-must_fail("stream: width must be a finite positive number", function()
-  stream("python3", math.huge, 100, { "-c", producer })
+must_fail("stream: 'width' must be finite", function()
+  stream("python3", { "-c", producer }, { width = math.huge, height = 100 })
+end)
+must_fail("stream: alpha must be either straight or premultiplied", function()
+  stream("python3", { "-c", producer }, {
+    width = 100,
+    height = 100,
+    alpha = "linear",
+  })
 end)
 must_fail("is a reserved argument", function()
-  stream("python3", 100, 100, { "-c", producer, "--width" })
+  stream("python3", { "-c", producer, "--width" }, { width = 100, height = 100 })
 end)
 must_fail("must be a string or a number", function()
-  stream("python3", 100, 100, { true })
+  stream("python3", { true }, { width = 100, height = 100 })
 end)
 
 must_fail("mid%-frame", function()
-  local stream = stream("python3", 100, 100, {
+  local stream = stream("python3", {
     "-c",
     producer,
     "--frames",
     "3",
     "--truncate",
-  })
+  }, { width = 100, height = 100 })
   while stream() do end
 end)
 must_fail("the producer failed", function()
-  local stream = stream("python3", 100, 100, {
+  local stream = stream("python3", {
     "-c",
     producer,
     "--frames",
     "2",
     "--fail",
-  })
+  }, { width = 100, height = 100 })
   while stream() do end
 end)
 must_fail("failed to spawn", function()
-  stream("pikke-no-such-producer", 100, 100, {})
+  stream("pikke-no-such-producer", {}, { width = 100, height = 100 })
 end)
 
 return {

@@ -50,20 +50,20 @@ impl Image {
         })
     }
 
-    pub fn from_rgba8(viewport: Viewport, rgba: &[u8]) -> Result<Self> {
+    pub fn from_buffer(viewport: Viewport, buffer: color::Buffer) -> Result<Self> {
         let count = viewport.total_pixels();
 
-        if rgba.len() != count * 4 {
+        if buffer.len() != count {
             return Err(Error::InvalidPixelData {
                 width: viewport.width(),
                 height: viewport.height(),
-                expected: count * 4,
-                got: rgba.len(),
+                expected: count,
+                got: buffer.len(),
             });
         }
 
         Ok(Self {
-            buffer: Arc::new(color::Buffer::from_rgba8(rgba)),
+            buffer: Arc::new(buffer),
             viewport,
             target_scale: viewport.scale(),
         })
@@ -1539,7 +1539,7 @@ mod tests {
         let mut rgba = vec![0u8; 16 * 4];
         rgba[..12 * 4].copy_from_slice(&[200, 30, 60, 255].repeat(12));
         rgba[12 * 4..].copy_from_slice(&[0, 0, 255, 255].repeat(4));
-        let image = Image::from_rgba8(viewport, &rgba)?;
+        let image = Image::from_buffer(viewport, color::Buffer::from_rgba8(&rgba))?;
 
         let dominant = image.dominant_in(Rectangle::new(0.0, 0.0, 4.0, 4.0))?;
 
@@ -1552,7 +1552,7 @@ mod tests {
     fn the_dominant_in_blends_the_members_of_its_bucket() -> Result<()> {
         let viewport = Viewport::from_logical(2.0, 1.0, Scale::default())?;
         let rgba = [200, 30, 60, 255, 202, 32, 62, 255];
-        let image = Image::from_rgba8(viewport, &rgba)?;
+        let image = Image::from_buffer(viewport, color::Buffer::from_rgba8(&rgba))?;
 
         let dominant = image.dominant_in(Rectangle::new(0.0, 0.0, 2.0, 1.0))?;
 
@@ -1565,7 +1565,7 @@ mod tests {
     fn the_dominant_in_ignores_the_transparent_pixels() -> Result<()> {
         let viewport = Viewport::from_logical(2.0, 2.0, Scale::default())?;
         let rgba = [0, 255, 0, 255, 255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0];
-        let image = Image::from_rgba8(viewport, &rgba)?;
+        let image = Image::from_buffer(viewport, color::Buffer::from_rgba8(&rgba))?;
 
         let dominant = image.dominant_in(Rectangle::new(0.0, 0.0, 2.0, 2.0))?;
 

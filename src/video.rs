@@ -220,6 +220,7 @@ fn drain_stderr(mut stderr: ChildStderr) -> (mpsc::Receiver<Vec<u8>>, thread::Jo
 #[cfg(test)]
 mod tests {
     use super::Video;
+    use crate::color;
     use crate::{Image, Scale, Viewport};
 
     fn frame(width: u16, height: u16, value: u8) -> Image {
@@ -227,7 +228,7 @@ mod tests {
             Viewport::from_logical(f32::from(width), f32::from(height), Scale::default()).unwrap();
         let rgba = [value, value, value, 255].repeat((width as usize) * (height as usize));
 
-        Image::from_rgba8(viewport, &rgba).unwrap()
+        Image::from_buffer(viewport, color::Buffer::from_rgba8(&rgba)).unwrap()
     }
 
     fn dir(name: &str) -> std::path::PathBuf {
