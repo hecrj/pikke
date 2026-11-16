@@ -80,7 +80,7 @@ change is a script edit; an op-behavior change is an engine edit.
 | `image` | `image(path) → Image` | Load a bitmap (path resolved against the calling module's directory). sRGB, with alpha. |
 | `blank` | `blank({width, height, color}) → Image` | A solid-color image (logical px); `color` a `#RRGGBB` hex, transparent when absent. |
 | `font` | `font(path) → Font` | Load a font (path resolved against the calling module's directory); used by `text`. |
-| `stream` | `stream(program, args, opts) → Stream` | Run an external frame producer (`args`: an array of strings/numbers, numbers rendered for the command line; `opts`: `{width, height, alpha}`, `alpha` the frame encoding: `"straight"` (default) or `"premultiplied"`). Returns a **lazy** stream of `Image` frames. |
+| `stream` | `stream(program, opts) → Stream` | Run an external frame producer (`opts`: `{width, height, args, alpha}`; `args` an array of strings/numbers, numbers rendered for the command line; `alpha` the frame encoding: `"straight"` (default) or `"premultiplied"`). Returns a **lazy** stream of `Image` frames. |
 | `rectangle` | `rectangle({x, y, size}) → Rectangle` | A rect; `x`/`y` top-left (px), `size` a scalar (w=h) or `{w, h}`. |
 | `path` | `path() → Path` | An empty path (logical px); painted by `fill`. |
 | `text` | `text(str, {font, size, weight, x, y}) → Text` | Lay out a string; the ink box's top-left at `x`/`y` (default 0). `size`: px. `weight`: font weight (default 400). Painted by `fill`. |

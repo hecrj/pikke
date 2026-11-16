@@ -3,9 +3,7 @@ use std::process::{Child, ChildStderr, Command, Stdio};
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 
-use mlua::{
-    FromLua, Lua, MetaMethod, ObjectLike, Table, UserData, UserDataFields, UserDataMethods, Value,
-};
+use mlua::{Lua, MetaMethod, ObjectLike, Table, UserData, UserDataFields, UserDataMethods, Value};
 
 use crate::color;
 use crate::image;
@@ -190,25 +188,13 @@ fn drain_stderr(mut stderr: ChildStderr) -> (mpsc::Receiver<Vec<u8>>, JoinHandle
     (rx, drain)
 }
 
-fn field<V>(opts: Option<&Table>, name: &str) -> mlua::Result<Option<V>>
-where
-    V: FromLua,
-{
-    Ok(opts
-        .map(|opts| opts.get::<Option<V>>(name))
-        .transpose()?
-        .flatten())
-}
-
 pub fn install(lua: &Lua, env: &Table, scale: Scale) -> Result<()> {
     env.set(
         "stream",
         lua.create_function(
-            move |_lua,
-                  (program, args, opts): (String, Table, Option<Table>)|
-                  -> mlua::Result<Stream> {
-                let width = lua::number("stream", "width", field(opts.as_ref(), "width")?)?;
-                let height = lua::number("stream", "height", field(opts.as_ref(), "height")?)?;
+            move |_lua, (program, opts): (String, Table)| -> mlua::Result<Stream> {
+                let width = lua::number("stream", "width", opts.get("width")?)?;
+                let height = lua::number("stream", "height", opts.get("height")?)?;
 
                 if width <= 0.0 {
                     return Err(mlua::Error::RuntimeError(
@@ -222,7 +208,7 @@ pub fn install(lua: &Lua, env: &Table, scale: Scale) -> Result<()> {
                     ));
                 }
 
-                let alpha: Option<String> = field(opts.as_ref(), "alpha")?;
+                let alpha: Option<String> = opts.get("alpha")?;
 
                 let alpha = match alpha.as_deref() {
                     None => color::Alpha::default(),
@@ -235,41 +221,7 @@ pub fn install(lua: &Lua, env: &Table, scale: Scale) -> Result<()> {
                     }
                 };
 
-                let mut argv = Vec::new();
-
-                for (index, argument) in args.sequence_values().enumerate() {
-                    match argument {
-                        Ok(Value::Nil) | Err(_) => {
-                            return Err(mlua::Error::RuntimeError(format!(
-                                "stream: argument {} is nil",
-                                index + 1
-                            )));
-                        }
-                        Ok(Value::String(string)) => {
-                            let string = string.to_string_lossy();
-
-                            if string == "--width" || string == "--height" {
-                                return Err(mlua::Error::RuntimeError(format!(
-                                    "stream: '{string}' is a reserved argument"
-                                )));
-                            }
-
-                            argv.push(string);
-                        }
-                        Ok(Value::Integer(integer)) => {
-                            argv.push(integer.to_string());
-                        }
-                        Ok(Value::Number(number)) => {
-                            argv.push(number.to_string());
-                        }
-                        Ok(_) => {
-                            return Err(mlua::Error::RuntimeError(format!(
-                                "stream: argument {} must be a string or a number",
-                                index + 1
-                            )));
-                        }
-                    }
-                }
+                let argv = argv(opts)?;
 
                 Stream::spawn(program, argv, width, height, scale, alpha)
                     .map_err(|error| mlua::Error::RuntimeError(error.to_string()))
@@ -277,4 +229,48 @@ pub fn install(lua: &Lua, env: &Table, scale: Scale) -> Result<()> {
         )?,
     )?;
     Ok(())
+}
+
+fn argv(opts: Table) -> mlua::Result<Vec<String>> {
+    let args: Option<Table> = opts.get("args")?;
+
+    let mut argv = Vec::new();
+
+    if let Some(args) = args {
+        for (index, argument) in args.sequence_values().enumerate() {
+            match argument {
+                Ok(Value::Nil) | Err(_) => {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "stream: argument {} is nil",
+                        index + 1
+                    )));
+                }
+                Ok(Value::String(string)) => {
+                    let string = string.to_string_lossy();
+
+                    if string == "--width" || string == "--height" {
+                        return Err(mlua::Error::RuntimeError(format!(
+                            "stream: '{string}' is a reserved argument"
+                        )));
+                    }
+
+                    argv.push(string);
+                }
+                Ok(Value::Integer(integer)) => {
+                    argv.push(integer.to_string());
+                }
+                Ok(Value::Number(number)) => {
+                    argv.push(number.to_string());
+                }
+                Ok(_) => {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "stream: argument {} must be a string or a number",
+                        index + 1
+                    )));
+                }
+            }
+        }
+    }
+
+    Ok(argv)
 }
