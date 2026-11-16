@@ -228,7 +228,11 @@ mod tests {
             Viewport::from_logical(f32::from(width), f32::from(height), Scale::default()).unwrap();
         let rgba = [value, value, value, 255].repeat((width as usize) * (height as usize));
 
-        Image::from_buffer(viewport, color::Buffer::from_rgba8(&rgba)).unwrap()
+        Image::from_buffer(
+            viewport,
+            color::Buffer::from_rgba::<color::Straight>(rgba.as_slice()),
+        )
+        .unwrap()
     }
 
     fn dir(name: &str) -> std::path::PathBuf {

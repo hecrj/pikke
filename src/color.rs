@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::marker::PhantomData;
 
 use mlua::{Lua, Table, UserData, UserDataFields, UserDataMethods, Value};
@@ -10,8 +11,8 @@ use rayon::slice::{ParallelSlice, ParallelSliceMut};
 
 use crate::lua;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Color<Space = Linear, Alpha = Normal> {
+#[derive(Debug, PartialEq)]
+pub struct Color<Space = Linear, Alpha = Straight> {
     pub r: f32,
     pub g: f32,
     pub b: f32,
@@ -24,12 +25,13 @@ pub struct Color<Space = Linear, Alpha = Normal> {
 pub struct Linear;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Srgb;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Normal;
+pub struct Straight;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Premultiplied;
 
-impl<S, N> Color<S, N> {
+impl<Space, Alpha> Color<Space, Alpha> {
     pub const TRANSPARENT: Self = Self {
         r: 0.0,
         g: 0.0,
@@ -40,8 +42,65 @@ impl<S, N> Color<S, N> {
     };
 }
 
-impl Color<Srgb> {
-    pub const fn from_pixel(pixel: Pixel) -> Self {
+impl<Space, Alpha> Color<Space, Alpha> {
+    pub fn to_space<Target>(self) -> Color<Target, Alpha>
+    where
+        Space: ToSpace<Target>,
+        Alpha: ToAlpha<Straight>,
+        Straight: ToAlpha<Alpha>,
+    {
+        ToSpace::to_space(self)
+    }
+
+    pub fn to_space_fast<Target>(self) -> Color<Target, Alpha>
+    where
+        Space: ToSpace<Target>,
+        Alpha: ToAlpha<Straight>,
+        Straight: ToAlpha<Alpha>,
+    {
+        ToSpace::to_space_fast(self)
+    }
+
+    pub fn to_alpha<Target>(self) -> Color<Space, Target>
+    where
+        Alpha: ToAlpha<Target>,
+    {
+        ToAlpha::to_alpha(self)
+    }
+}
+
+impl<Space> Color<Space, Straight> {
+    pub fn premultiply(self) -> Color<Space, Premultiplied> {
+        Color {
+            r: self.r * self.a,
+            g: self.g * self.a,
+            b: self.b * self.a,
+            a: self.a,
+            _space: PhantomData,
+            _alpha: PhantomData,
+        }
+    }
+}
+
+impl<Space> Color<Space, Premultiplied> {
+    pub fn demultiply(self) -> Color<Space, Straight> {
+        if self.a == 0.0 {
+            return Color::TRANSPARENT;
+        }
+
+        Color {
+            r: self.r / self.a,
+            g: self.g / self.a,
+            b: self.b / self.a,
+            a: self.a,
+            _space: PhantomData,
+            _alpha: PhantomData,
+        }
+    }
+}
+
+impl<Alpha> Color<Srgb, Alpha> {
+    pub const fn from_pixel(pixel: Pixel<Alpha>) -> Self {
         Self {
             r: pixel.r as f32 / 255.0,
             g: pixel.g as f32 / 255.0,
@@ -52,23 +111,21 @@ impl Color<Srgb> {
         }
     }
 
-    pub const fn from_rgba8(rgba: [u8; 4]) -> Self {
-        Self::from_pixel(Pixel::from_rgba8(rgba))
-    }
-
-    pub const fn to_pixel(self) -> Pixel {
-        Pixel {
-            r: encode_u8(self.r),
-            g: encode_u8(self.g),
-            b: encode_u8(self.b),
-            a: encode_u8(self.a),
-        }
+    pub const fn to_pixel(self) -> Pixel<Alpha> {
+        Pixel::from_rgba8([
+            encode_u8(self.r),
+            encode_u8(self.g),
+            encode_u8(self.b),
+            encode_u8(self.a),
+        ])
     }
 
     pub const fn to_rgba8(self) -> [u8; 4] {
         self.to_pixel().to_rgba8()
     }
+}
 
+impl Color<Srgb> {
     pub fn to_linear(self) -> Color<Linear> {
         Color {
             r: srgb_to_linear(self.r),
@@ -87,21 +144,6 @@ impl Color<Srgb> {
             g: srgb_to_linear_fast(self.g),
             b: srgb_to_linear_fast(self.b),
             a: self.a,
-            _space: PhantomData,
-            _alpha: PhantomData,
-        }
-    }
-}
-
-impl Color<Srgb, Premultiplied> {
-    pub const fn from_premultiplied_rgba8(rgba: [u8; 4]) -> Self {
-        let Color { r, g, b, a, .. } = Color::from_pixel(Pixel::from_rgba8(rgba));
-
-        Self {
-            r,
-            g,
-            b,
-            a,
             _space: PhantomData,
             _alpha: PhantomData,
         }
@@ -215,17 +257,6 @@ impl Color {
 }
 
 impl<S> Color<S> {
-    pub const fn premultiply(self) -> Color<S, Premultiplied> {
-        Color {
-            r: self.r * self.a,
-            g: self.g * self.a,
-            b: self.b * self.a,
-            a: self.a,
-            _space: PhantomData,
-            _alpha: PhantomData,
-        }
-    }
-
     pub const fn invert(self) -> Self {
         Self {
             r: invert(self.r),
@@ -239,28 +270,6 @@ impl<S> Color<S> {
 }
 
 impl<S> Color<S, Premultiplied> {
-    pub const fn demultiply(self) -> Color<S> {
-        if self.a == 0.0 {
-            return Color {
-                r: 0.0,
-                g: 0.0,
-                b: 0.0,
-                a: 0.0,
-                _space: PhantomData,
-                _alpha: PhantomData,
-            };
-        }
-
-        Color {
-            r: self.r / self.a,
-            g: self.g / self.a,
-            b: self.b / self.a,
-            a: self.a,
-            _space: PhantomData,
-            _alpha: PhantomData,
-        }
-    }
-
     pub const fn over(self, layer: Self) -> Self {
         let retain = 1.0 - layer.a;
 
@@ -306,6 +315,14 @@ impl Color<Linear, Premultiplied> {
         }
     }
 }
+
+impl<Space, Alpha> Clone for Color<Space, Alpha> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<Space, Alpha> Copy for Color<Space, Alpha> {}
 
 pub fn install(lua: &Lua, env: &Table) -> crate::Result<()> {
     env.set(
@@ -412,26 +429,158 @@ impl RowMut<'_> {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Buffer {
+pub struct Rgba<'a, Alpha> {
+    raw: Cow<'a, [u8]>,
+    _alpha: PhantomData<Alpha>,
+}
+
+impl<'a, Alpha> Rgba<'a, Alpha> {
+    pub fn new(rgba: impl Into<Cow<'a, [u8]>>) -> Self {
+        Self {
+            raw: rgba.into(),
+            _alpha: PhantomData,
+        }
+    }
+}
+
+impl<Alpha> Rgba<'_, Alpha> {
+    fn iter(&self) -> impl Iterator<Item = Color<Srgb, Alpha>> {
+        self.raw
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|rgba| Color::<Srgb, Alpha>::from_pixel(Pixel::from_rgba8(*rgba)))
+    }
+}
+
+impl<Alpha> From<Vec<u8>> for Rgba<'_, Alpha> {
+    fn from(rgba: Vec<u8>) -> Self {
+        Self::new(rgba)
+    }
+}
+
+impl<'a, Alpha> From<&'a [u8]> for Rgba<'a, Alpha> {
+    fn from(rgba: &'a [u8]) -> Self {
+        Self::new(rgba)
+    }
+}
+
+pub trait ToAlpha<Target>: Sized {
+    fn to_alpha<Space>(color: Color<Space, Self>) -> Color<Space, Target>;
+}
+
+impl<T> ToAlpha<T> for T {
+    fn to_alpha<Space>(color: Color<Space, Self>) -> Color<Space, T> {
+        color
+    }
+}
+
+impl ToAlpha<Premultiplied> for Straight {
+    fn to_alpha<Space>(color: Color<Space, Self>) -> Color<Space, Premultiplied> {
+        color.premultiply()
+    }
+}
+
+impl ToAlpha<Straight> for Premultiplied {
+    fn to_alpha<Space>(color: Color<Space, Self>) -> Color<Space, Straight> {
+        color.demultiply()
+    }
+}
+
+pub trait ToSpace<Target>
+where
+    Self: Sized,
+{
+    fn to_space<Alpha>(color: Color<Self, Alpha>) -> Color<Target, Alpha>
+    where
+        Alpha: ToAlpha<Straight>,
+        Straight: ToAlpha<Alpha>;
+
+    fn to_space_fast<Alpha>(color: Color<Self, Alpha>) -> Color<Target, Alpha>
+    where
+        Alpha: ToAlpha<Straight>,
+        Straight: ToAlpha<Alpha>,
+    {
+        Self::to_space(color)
+    }
+}
+
+impl<T> ToSpace<T> for T {
+    fn to_space<Alpha>(color: Color<T, Alpha>) -> Color<T, Alpha> {
+        color
+    }
+}
+
+impl ToSpace<Linear> for Srgb {
+    fn to_space<Alpha>(color: Color<Self, Alpha>) -> Color<Linear, Alpha>
+    where
+        Alpha: ToAlpha<Straight>,
+        Straight: ToAlpha<Alpha>,
+    {
+        color.to_alpha::<Straight>().to_linear().to_alpha::<Alpha>()
+    }
+
+    fn to_space_fast<Alpha>(color: Color<Self, Alpha>) -> Color<Linear, Alpha>
+    where
+        Alpha: ToAlpha<Straight>,
+        Straight: ToAlpha<Alpha>,
+    {
+        color
+            .to_alpha::<Straight>()
+            .to_linear_fast()
+            .to_alpha::<Alpha>()
+    }
+}
+
+impl ToSpace<Srgb> for Linear {
+    fn to_space<Alpha>(color: Color<Self, Alpha>) -> Color<Srgb, Alpha>
+    where
+        Alpha: ToAlpha<Straight>,
+        Straight: ToAlpha<Alpha>,
+    {
+        color.to_alpha::<Straight>().to_srgb().to_alpha::<Alpha>()
+    }
+
+    fn to_space_fast<Alpha>(color: Color<Self, Alpha>) -> Color<Srgb, Alpha>
+    where
+        Alpha: ToAlpha<Straight>,
+        Straight: ToAlpha<Alpha>,
+    {
+        color
+            .to_alpha::<Straight>()
+            .to_srgb_fast()
+            .to_alpha::<Alpha>()
+    }
+}
+
+#[derive(Debug)]
+pub struct Buffer<Space = Linear> {
     r: Vec<f32>,
     g: Vec<f32>,
     b: Vec<f32>,
     a: Vec<f32>,
+    _space: PhantomData<Space>,
 }
 
-impl Buffer {
-    pub fn new(color: Color<Linear, Premultiplied>, count: usize) -> Self {
+impl<Space> Buffer<Space> {
+    pub fn new(color: Color<Space, Premultiplied>, count: usize) -> Self {
         Self {
             r: vec![color.r; count],
             g: vec![color.g; count],
             b: vec![color.b; count],
             a: vec![color.a; count],
+            _space: PhantomData,
         }
     }
 
-    pub fn from_rgba8(rgba: &[u8]) -> Self {
-        let count = rgba.len() / 4;
+    pub fn from_rgba<'a, Alpha>(rgba: impl Into<Rgba<'a, Alpha>>) -> Self
+    where
+        Srgb: ToSpace<Space>,
+        Alpha: ToAlpha<Straight> + ToAlpha<Premultiplied>,
+        Straight: ToAlpha<Alpha>,
+    {
+        let rgba = rgba.into();
+        let count = rgba.raw.len() / 4;
 
         let (mut r, mut g, mut b, mut a) = (
             Vec::with_capacity(count),
@@ -440,8 +589,8 @@ impl Buffer {
             Vec::with_capacity(count),
         );
 
-        for pixel in rgba.as_chunks::<4>().0 {
-            let color = Color::from_rgba8(*pixel).to_linear().premultiply();
+        for color in rgba.iter() {
+            let color = color.to_space::<Space>().to_alpha::<Premultiplied>();
 
             r.push(color.r);
             g.push(color.g);
@@ -449,32 +598,13 @@ impl Buffer {
             a.push(color.a);
         }
 
-        Self { r, g, b, a }
-    }
-
-    pub fn from_premultiplied_rgba8(rgba: &[u8]) -> Self {
-        let count = rgba.len() / 4;
-
-        let (mut r, mut g, mut b, mut a) = (
-            Vec::with_capacity(count),
-            Vec::with_capacity(count),
-            Vec::with_capacity(count),
-            Vec::with_capacity(count),
-        );
-
-        for pixel in rgba.as_chunks::<4>().0 {
-            let color = Color::from_premultiplied_rgba8(*pixel)
-                .demultiply()
-                .to_linear()
-                .premultiply();
-
-            r.push(color.r);
-            g.push(color.g);
-            b.push(color.b);
-            a.push(color.a);
+        Self {
+            r,
+            g,
+            b,
+            a,
+            _space: PhantomData,
         }
-
-        Self { r, g, b, a }
     }
 
     pub fn len(&self) -> usize {
@@ -576,6 +706,18 @@ impl Buffer {
 
     pub fn iter(&self) -> impl Iterator<Item = Color<Linear, Premultiplied>> {
         iter(&self.r, &self.g, &self.b, &self.a)
+    }
+}
+
+impl<Space> Clone for Buffer<Space> {
+    fn clone(&self) -> Self {
+        Self {
+            r: self.r.clone(),
+            g: self.g.clone(),
+            b: self.b.clone(),
+            a: self.a.clone(),
+            _space: PhantomData,
+        }
     }
 }
 
@@ -713,23 +855,38 @@ fn iter_mut<'a>(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Pixel {
+#[derive(Debug, PartialEq, Eq)]
+pub struct Pixel<Alpha = Straight> {
     pub r: u8,
     pub g: u8,
     pub b: u8,
     pub a: u8,
+    _alpha: PhantomData<Alpha>,
 }
 
-impl Pixel {
+impl<Alpha> Pixel<Alpha> {
     pub const fn from_rgba8([r, g, b, a]: [u8; 4]) -> Self {
-        Self { r, g, b, a }
+        Self {
+            r,
+            g,
+            b,
+            a,
+            _alpha: PhantomData,
+        }
     }
 
     pub const fn to_rgba8(self) -> [u8; 4] {
         [self.r, self.g, self.b, self.a]
     }
 }
+
+impl<Alpha> Clone for Pixel<Alpha> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<Alpha> Copy for Pixel<Alpha> {}
 
 impl UserData for Pixel {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {

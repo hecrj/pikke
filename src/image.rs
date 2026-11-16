@@ -74,7 +74,7 @@ impl Image {
         let (width, height) = (rgba.width(), rgba.height());
 
         Ok(Self {
-            buffer: Arc::new(color::Buffer::from_rgba8(&rgba)),
+            buffer: Arc::new(color::Buffer::from_rgba::<color::Straight>(rgba.into_raw())),
             viewport: Viewport::from_physical_u32(width, height, Scale::default())?,
             target_scale,
         })
@@ -1301,7 +1301,7 @@ mod tests {
 
     #[test]
     fn the_blank_paints_the_whole_canvas() -> Result<()> {
-        let paint = Color::from_rgba8([200, 30, 60, 255]).to_linear();
+        let paint = Color::from_pixel(color::Pixel::from_rgba8([200, 30, 60, 255])).to_linear();
         let image = Image::new(Scale::default(), 4.0, 2.0, paint)?;
 
         assert_eq!((image.width(), image.height()), (4, 2));
@@ -1314,7 +1314,7 @@ mod tests {
 
     #[test]
     fn the_blank_sizes_its_buffer_at_the_run_scale() -> Result<()> {
-        let paint = Color::from_rgba8([255, 255, 255, 255]).to_linear();
+        let paint = Color::from_pixel(color::Pixel::from_rgba8([255, 255, 255, 255])).to_linear();
         let image = Image::new(Scale::new(0.5), 300.0, 100.0, paint)?;
 
         assert_eq!((image.width(), image.height()), (150, 50));
@@ -1410,7 +1410,7 @@ mod tests {
 
     #[test]
     fn the_resize_keeps_the_aspect_for_a_single_dimension() -> Result<()> {
-        let color = Color::from_rgba8([200, 30, 60, 255]).to_linear();
+        let color = Color::from_pixel(color::Pixel::from_rgba8([200, 30, 60, 255])).to_linear();
 
         let mut image = Image::new(Scale::default(), 64.0, 32.0, color)?;
         image.resize(
@@ -1539,7 +1539,10 @@ mod tests {
         let mut rgba = vec![0u8; 16 * 4];
         rgba[..12 * 4].copy_from_slice(&[200, 30, 60, 255].repeat(12));
         rgba[12 * 4..].copy_from_slice(&[0, 0, 255, 255].repeat(4));
-        let image = Image::from_buffer(viewport, color::Buffer::from_rgba8(&rgba))?;
+        let image = Image::from_buffer(
+            viewport,
+            color::Buffer::from_rgba::<color::Straight>(rgba.as_slice()),
+        )?;
 
         let dominant = image.dominant_in(Rectangle::new(0.0, 0.0, 4.0, 4.0))?;
 
@@ -1552,7 +1555,10 @@ mod tests {
     fn the_dominant_in_blends_the_members_of_its_bucket() -> Result<()> {
         let viewport = Viewport::from_logical(2.0, 1.0, Scale::default())?;
         let rgba = [200, 30, 60, 255, 202, 32, 62, 255];
-        let image = Image::from_buffer(viewport, color::Buffer::from_rgba8(&rgba))?;
+        let image = Image::from_buffer(
+            viewport,
+            color::Buffer::from_rgba::<color::Straight>(rgba.as_slice()),
+        )?;
 
         let dominant = image.dominant_in(Rectangle::new(0.0, 0.0, 2.0, 1.0))?;
 
@@ -1565,7 +1571,10 @@ mod tests {
     fn the_dominant_in_ignores_the_transparent_pixels() -> Result<()> {
         let viewport = Viewport::from_logical(2.0, 2.0, Scale::default())?;
         let rgba = [0, 255, 0, 255, 255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0];
-        let image = Image::from_buffer(viewport, color::Buffer::from_rgba8(&rgba))?;
+        let image = Image::from_buffer(
+            viewport,
+            color::Buffer::from_rgba::<color::Straight>(rgba.as_slice()),
+        )?;
 
         let dominant = image.dominant_in(Rectangle::new(0.0, 0.0, 2.0, 2.0))?;
 
@@ -1903,7 +1912,7 @@ mod tests {
     #[test]
     fn the_fill_paints_an_aligned_region_exactly() -> Result<()> {
         let mut image = Image::new(Scale::default(), 8.0, 8.0, Color::TRANSPARENT)?;
-        let paint = Color::from_rgba8([128, 160, 192, 255]).to_linear();
+        let paint = Color::from_pixel(color::Pixel::from_rgba8([128, 160, 192, 255])).to_linear();
 
         image.fill(Rectangle::new(1.0, 2.0, 4.0, 3.0), paint);
 
@@ -1927,7 +1936,7 @@ mod tests {
     #[test]
     fn the_fill_snaps_fractional_edges_to_the_pixel_grid() -> Result<()> {
         let mut image = Image::new(Scale::default(), 4.0, 4.0, Color::TRANSPARENT)?;
-        let paint = Color::from_rgba8([255, 0, 0, 255]).to_linear();
+        let paint = Color::from_pixel(color::Pixel::from_rgba8([255, 0, 0, 255])).to_linear();
 
         image.fill(Rectangle::new(0.5, 0.5, 3.0, 3.0), paint);
 
@@ -1950,7 +1959,7 @@ mod tests {
     #[test]
     fn the_fill_snaps_at_the_run_scale() -> Result<()> {
         let mut image = Image::new(Scale::new(0.5), 16.0, 16.0, Color::TRANSPARENT)?;
-        let paint = Color::from_rgba8([0, 255, 255, 255]).to_linear();
+        let paint = Color::from_pixel(color::Pixel::from_rgba8([0, 255, 255, 255])).to_linear();
 
         image.fill(Rectangle::new(0.5, 0.5, 3.0, 3.0), paint);
 
@@ -1975,7 +1984,7 @@ mod tests {
     #[test]
     fn the_fill_is_a_no_op_for_degenerate_regions() -> Result<()> {
         let mut image = Image::new(Scale::default(), 4.0, 4.0, Color::TRANSPARENT)?;
-        let paint = Color::from_rgba8([255, 255, 255, 255]).to_linear();
+        let paint = Color::from_pixel(color::Pixel::from_rgba8([255, 255, 255, 255])).to_linear();
 
         image.fill(Rectangle::new(0.0, 0.0, 0.0, 0.0), paint);
         image.fill(Rectangle::new(0.0, 0.0, -2.0, 2.0), paint);
@@ -1990,7 +1999,7 @@ mod tests {
     #[test]
     fn the_fill_path_paints_the_aligned_path_exactly() -> Result<()> {
         let mut image = Image::new(Scale::default(), 10.0, 10.0, Color::TRANSPARENT)?;
-        let paint = Color::from_rgba8([255, 255, 255, 255]).to_linear();
+        let paint = Color::from_pixel(color::Pixel::from_rgba8([255, 255, 255, 255])).to_linear();
 
         let mut path = crate::path::Path::new();
         path.move_to(2.0, 2.0);
@@ -2017,7 +2026,7 @@ mod tests {
     #[test]
     fn the_fill_path_is_a_no_op_for_degenerate_paths() -> Result<()> {
         let mut image = Image::new(Scale::default(), 4.0, 4.0, Color::TRANSPARENT)?;
-        let paint = Color::from_rgba8([255, 255, 255, 255]).to_linear();
+        let paint = Color::from_pixel(color::Pixel::from_rgba8([255, 255, 255, 255])).to_linear();
 
         image.fill(crate::path::Path::new(), paint);
 
@@ -2049,7 +2058,7 @@ mod tests {
         assert!(text.viewport.logical_width() > 0.0 && text.viewport.logical_height() > 0.0);
 
         let mut image = Image::new(Scale::default(), 200.0, 200.0, Color::TRANSPARENT)?;
-        let paint = Color::from_rgba8([200, 30, 60, 255]).to_linear();
+        let paint = Color::from_pixel(color::Pixel::from_rgba8([200, 30, 60, 255])).to_linear();
         image.fill_text(&text, paint)?;
 
         let painted = image.to_rgba8();
@@ -2116,7 +2125,7 @@ mod tests {
     #[test]
     fn the_fill_text_is_a_no_op_for_degenerate_text() -> Result<()> {
         let mut image = Image::new(Scale::default(), 4.0, 4.0, Color::TRANSPARENT)?;
-        let paint = Color::from_rgba8([255, 255, 255, 255]).to_linear();
+        let paint = Color::from_pixel(color::Pixel::from_rgba8([255, 255, 255, 255])).to_linear();
 
         let empty = Text::new(Scale::default(), "Noto Sans", 100.0, 400.0, 0.0, 0.0, "")?;
         image.fill_text(&empty, paint)?;
@@ -2145,7 +2154,7 @@ mod tests {
         assert!(text.viewport.logical_width() > 0.0 && text.viewport.logical_height() > 0.0);
 
         let mut image = Image::new(Scale::default(), 200.0, 200.0, Color::TRANSPARENT)?;
-        let paint = Color::from_rgba8([200, 30, 60, 255]).to_linear();
+        let paint = Color::from_pixel(color::Pixel::from_rgba8([200, 30, 60, 255])).to_linear();
         image.fill_text(&text, paint)?;
 
         let painted = image.to_rgba8();
@@ -2208,7 +2217,8 @@ mod tests {
 
     #[test]
     fn the_divergent_branches_share_one_load() -> Result<()> {
-        let base_color = Color::from_rgba8([200, 30, 60, 255]).to_linear();
+        let base_color =
+            Color::from_pixel(color::Pixel::from_rgba8([200, 30, 60, 255])).to_linear();
         let source = Image::new(Scale::default(), 32.0, 32.0, base_color)?;
         let file = std::env::temp_dir().join(format!(
             "pikke-image-test-{}-shared-load.png",
@@ -2220,11 +2230,11 @@ mod tests {
         let mut right = reference.clone();
         left.fill(
             Rectangle::new(0.0, 0.0, 16.0, 32.0),
-            Color::from_rgba8([255, 255, 255, 255]).to_linear(),
+            Color::from_pixel(color::Pixel::from_rgba8([255, 255, 255, 255])).to_linear(),
         );
         right.fill(
             Rectangle::new(16.0, 0.0, 16.0, 32.0),
-            Color::from_rgba8([0, 0, 0, 255]).to_linear(),
+            Color::from_pixel(color::Pixel::from_rgba8([0, 0, 0, 255])).to_linear(),
         );
 
         source.write(&file)?;
@@ -2245,8 +2255,8 @@ mod tests {
 
     #[test]
     fn the_blend_uses_the_other_as_it_was_at_the_call() -> Result<()> {
-        let black = Color::from_rgba8([0, 0, 0, 255]).to_linear();
-        let white = Color::from_rgba8([255, 255, 255, 255]).to_linear();
+        let black = Color::from_pixel(color::Pixel::from_rgba8([0, 0, 0, 255])).to_linear();
+        let white = Color::from_pixel(color::Pixel::from_rgba8([255, 255, 255, 255])).to_linear();
 
         let mut base = Reference::blank(Scale::default(), 100.0, 100.0, black);
         let mut layer = Reference::blank(Scale::default(), 50.0, 50.0, white);

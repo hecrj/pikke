@@ -100,9 +100,13 @@ impl Stream {
                     return Ok(Some(Image::from_buffer(
                         self.viewport,
                         match self.alpha {
-                            color::Alpha::Straight => color::Buffer::from_rgba8(&self.buffer),
+                            color::Alpha::Straight => {
+                                color::Buffer::from_rgba::<color::Straight>(self.buffer.as_slice())
+                            }
                             color::Alpha::Premultiplied => {
-                                color::Buffer::from_premultiplied_rgba8(&self.buffer)
+                                color::Buffer::from_rgba::<color::Premultiplied>(
+                                    self.buffer.as_slice(),
+                                )
                             }
                         },
                     )?));

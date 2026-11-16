@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use mlua::{Lua, Result, Value};
 
-use crate::color::Oklch;
+use crate::color;
 use crate::{Color, Gradient, Paint, Point};
 
 pub fn point(operation: &str, value: &Value) -> Result<Point> {
@@ -60,7 +60,13 @@ pub fn hex(operation: &str, color: &str) -> Result<Color> {
             .map_err(|_| mlua::Error::RuntimeError(message()))
     };
 
-    Ok(Color::from_rgba8([channel(0)?, channel(2)?, channel(4)?, 255]).to_linear())
+    Ok(Color::from_pixel(color::Pixel::from_rgba8([
+        channel(0)?,
+        channel(2)?,
+        channel(4)?,
+        255,
+    ]))
+    .to_linear())
 }
 
 pub fn color(operation: &str, value: &Value) -> Result<Color> {
@@ -77,7 +83,7 @@ pub fn color(operation: &str, value: &Value) -> Result<Color> {
 
     if let Some(color) = value
         .as_userdata()
-        .and_then(|color| color.borrow::<Oklch>().ok())
+        .and_then(|color| color.borrow::<color::Oklch>().ok())
     {
         return Ok(color.to_linear_rgb());
     }
