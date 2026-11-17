@@ -399,16 +399,15 @@ impl<Space: 'static> Image<Space> {
 
         match paint.into() {
             Paint::Color(color) => {
-                let color = color.premultiply();
+                let color = color.to_space().premultiply();
 
                 for (i, pixel) in pixmap.data().iter().enumerate() {
                     let cover = pixel.a as f32 / 255.0;
 
                     if cover > 0.0 {
                         let base = buffer.at(i);
-                        let layer = color.scale(cover);
 
-                        buffer.put(i, base.over(layer.to_space()));
+                        buffer.put(i, base.over(color.scale(cover)));
                     }
                 }
             }
@@ -438,9 +437,9 @@ impl<Space: 'static> Image<Space> {
                         let color = gradient.color_at(t);
                         let i = y * width + x;
                         let base = buffer.at(i);
-                        let layer = color.premultiply().scale(cover);
+                        let layer = color.to_space().scale(cover).premultiply();
 
-                        buffer.put(i, base.over(layer.to_space()));
+                        buffer.put(i, base.over(layer));
                     }
                 }
             }
@@ -574,7 +573,7 @@ impl<Space: 'static> Image<Space> {
                 let base = buffer.at(i);
 
                 let layer = match &paint {
-                    Paint::Color(color) => color.premultiply().scale(cover),
+                    Paint::Color(color) => *color,
                     Paint::Gradient(gradient) => {
                         let projection =
                             (canvas_x as f32 + 0.5) * dx + (canvas_y as f32 + 0.5) * dy;
@@ -584,13 +583,13 @@ impl<Space: 'static> Image<Space> {
                             0.0
                         };
 
-                        gradient.color_at(t).premultiply().scale(cover)
+                        gradient.color_at(t)
                     }
                 };
 
                 let blended = base
                     .to_space::<color::Srgb>()
-                    .over(layer.demultiply().to_srgb().premultiply())
+                    .over(layer.scale(cover).to_srgb().premultiply())
                     .to_space::<Space>();
 
                 buffer.put(i, blended);

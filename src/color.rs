@@ -277,6 +277,17 @@ impl<S> Color<S> {
             _alpha: PhantomData,
         }
     }
+
+    pub fn scale(self, alpha: f32) -> Self {
+        Self {
+            r: self.r,
+            g: self.g,
+            b: self.b,
+            a: self.a * alpha,
+            _space: PhantomData,
+            _alpha: PhantomData,
+        }
+    }
 }
 
 impl<S> Color<S, Premultiplied> {
@@ -299,6 +310,17 @@ impl<S> Color<S, Premultiplied> {
             g: layer.g + self.g * retain,
             b: layer.b + self.b * retain,
             a: layer.a + self.a * retain,
+            _space: PhantomData,
+            _alpha: PhantomData,
+        }
+    }
+
+    pub fn scale(self, alpha: f32) -> Self {
+        Self {
+            r: self.r * alpha,
+            g: self.g * alpha,
+            b: self.b * alpha,
+            a: self.a * alpha,
             _space: PhantomData,
             _alpha: PhantomData,
         }
@@ -378,19 +400,6 @@ where
             g: color.g * scale,
             b: color.b * scale,
             ..color
-        }
-    }
-}
-
-impl Color<Linear, Premultiplied> {
-    pub fn scale(self, alpha: f32) -> Self {
-        Self {
-            r: self.r * alpha,
-            g: self.g * alpha,
-            b: self.b * alpha,
-            a: self.a * alpha,
-            _space: PhantomData,
-            _alpha: PhantomData,
         }
     }
 }
