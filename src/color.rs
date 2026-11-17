@@ -80,6 +80,20 @@ impl<Space> Color<Space, Straight> {
             _alpha: PhantomData,
         }
     }
+
+    pub fn luma(self) -> f32
+    where
+        Space: Luma,
+    {
+        Space::luma(self)
+    }
+
+    pub fn with_luma(self, luma: f32) -> Self
+    where
+        Space: Luma,
+    {
+        Space::with_luma(self, luma)
+    }
 }
 
 impl<Space> Color<Space, Premultiplied> {
@@ -166,25 +180,21 @@ impl Color {
         }
     }
 
-    pub fn with_luma(self, luma: f32) -> Self {
-        let luma = luma.clamp(0.0, 1.0);
-        let current = self.premultiply().luma();
+    pub fn stretch(self, low: f32, high: f32) -> Self {
+        let scale = 1.0 / (high - low);
 
-        if current == 0.0 {
-            return Self {
-                r: 0.0,
-                g: 0.0,
-                b: 0.0,
-                ..self
-            };
-        }
-
-        let scale = luma / current;
+        let stretch = |value: f32| {
+            if value < low || value > high {
+                value
+            } else {
+                (value - low) * scale
+            }
+        };
 
         Self {
-            r: self.r * scale,
-            g: self.g * scale,
-            b: self.b * scale,
+            r: stretch(self.r),
+            g: stretch(self.g),
+            b: stretch(self.b),
             ..self
         }
     }
@@ -270,6 +280,17 @@ impl<S> Color<S> {
 }
 
 impl<S> Color<S, Premultiplied> {
+    pub fn from_rgba([r, g, b, a]: [f32; 4]) -> Self {
+        Self {
+            r,
+            g,
+            b,
+            a,
+            _space: PhantomData,
+            _alpha: PhantomData,
+        }
+    }
+
     pub const fn over(self, layer: Self) -> Self {
         let retain = 1.0 - layer.a;
 
@@ -284,26 +305,56 @@ impl<S> Color<S, Premultiplied> {
     }
 }
 
-impl Color<Linear, Premultiplied> {
-    pub fn from_rgba([r, g, b, a]: [f32; 4]) -> Self {
-        Self {
-            r,
-            g,
-            b,
-            a,
-            _space: PhantomData,
-            _alpha: PhantomData,
-        }
+pub trait Luma: Sized {
+    fn luma(color: Color<Self, Straight>) -> f32;
+
+    fn with_luma(color: Color<Self, Straight>, luma: f32) -> Color<Self, Straight>;
+}
+
+impl Luma for Srgb {
+    fn luma(color: Color<Self, Straight>) -> f32 {
+        Linear::luma(color.to_space())
     }
 
-    pub fn luma(&self) -> f32 {
+    fn with_luma(color: Color<Self, Straight>, luma: f32) -> Color<Self, Straight> {
+        Linear::with_luma(color.to_space(), luma).to_space()
+    }
+}
+
+impl Luma for Linear {
+    fn luma(color: Color<Self, Straight>) -> f32 {
         const LUMA_R: f64 = 0.2126;
         const LUMA_G: f64 = 0.7152;
         const LUMA_B: f64 = 0.0722;
 
-        LUMA_R as f32 * self.r + LUMA_G as f32 * self.g + LUMA_B as f32 * self.b
+        LUMA_R as f32 * color.r + LUMA_G as f32 * color.g + LUMA_B as f32 * color.b
     }
 
+    fn with_luma(color: Color<Self, Straight>, luma: f32) -> Color<Self, Straight> {
+        let luma = luma.clamp(0.0, 1.0);
+        let current = Self::luma(color);
+
+        if current == 0.0 {
+            return Color {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                ..color
+            };
+        }
+
+        let scale = luma / current;
+
+        Color {
+            r: color.r * scale,
+            g: color.g * scale,
+            b: color.b * scale,
+            ..color
+        }
+    }
+}
+
+impl Color<Linear, Premultiplied> {
     pub fn scale(self, alpha: f32) -> Self {
         Self {
             r: self.r * alpha,
@@ -384,52 +435,63 @@ impl UserData for Color {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Row<'a> {
+pub struct Row<'a, Space> {
     r: &'a [f32],
     g: &'a [f32],
     b: &'a [f32],
     a: &'a [f32],
+    _space: PhantomData<Space>,
 }
 
-impl Row<'_> {
+impl<Space: 'static> Row<'_, Space> {
     pub fn crop(&self, left: usize, right: usize) -> Self {
         Self {
             r: &self.r[left..right],
             g: &self.g[left..right],
             b: &self.b[left..right],
             a: &self.a[left..right],
+            _space: PhantomData,
         }
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = Color<Linear, Premultiplied>> {
+    pub fn iter(&self) -> impl Iterator<Item = Color<Space, Premultiplied>> {
         iter(self.r, self.g, self.b, self.a)
     }
 }
 
-pub struct RowMut<'a> {
+impl<Space> Clone for Row<'_, Space> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<Space> Copy for Row<'_, Space> {}
+
+pub struct RowMut<'a, Space> {
     r: &'a mut [f32],
     g: &'a mut [f32],
     b: &'a mut [f32],
     a: &'a mut [f32],
+    _space: PhantomData<Space>,
 }
 
-impl RowMut<'_> {
+impl<Space: 'static> RowMut<'_, Space> {
     pub fn crop(self, left: usize, right: usize) -> Self {
         Self {
             r: &mut self.r[left..right],
             g: &mut self.g[left..right],
             b: &mut self.b[left..right],
             a: &mut self.a[left..right],
+            _space: PhantomData,
         }
     }
 
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = ColorMut<'_>> {
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = ColorMut<'_, Space>> {
         iter_mut(self.r, self.g, self.b, self.a)
     }
 }
 
-pub struct Rgba<'a, Alpha> {
+pub struct Rgba<'a, Alpha = Straight> {
     raw: Cow<'a, [u8]>,
     _alpha: PhantomData<Alpha>,
 }
@@ -440,6 +502,10 @@ impl<'a, Alpha> Rgba<'a, Alpha> {
             raw: rgba.into(),
             _alpha: PhantomData,
         }
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        &self.raw
     }
 }
 
@@ -562,7 +628,7 @@ pub struct Buffer<Space = Linear> {
     _space: PhantomData<Space>,
 }
 
-impl<Space> Buffer<Space> {
+impl<Space: 'static> Buffer<Space> {
     pub fn new(color: Color<Space, Premultiplied>, count: usize) -> Self {
         Self {
             r: vec![color.r; count],
@@ -611,11 +677,11 @@ impl<Space> Buffer<Space> {
         self.r.len()
     }
 
-    pub fn at(&self, i: usize) -> Color<Linear, Premultiplied> {
+    pub fn at(&self, i: usize) -> Color<Space, Premultiplied> {
         Color::from_rgba([self.r[i], self.g[i], self.b[i], self.a[i]])
     }
 
-    pub fn row(&self, row: usize, width: usize) -> Row<'_> {
+    pub fn row(&self, row: usize, width: usize) -> Row<'_, Space> {
         let (start, end) = (row * width, (row + 1) * width);
 
         Row {
@@ -623,10 +689,11 @@ impl<Space> Buffer<Space> {
             g: &self.g[start..end],
             b: &self.b[start..end],
             a: &self.a[start..end],
+            _space: PhantomData,
         }
     }
 
-    pub fn row_mut(&mut self, row: usize, width: usize) -> RowMut<'_> {
+    pub fn row_mut(&mut self, row: usize, width: usize) -> RowMut<'_, Space> {
         let (start, end) = (row * width, (row + 1) * width);
 
         RowMut {
@@ -634,14 +701,18 @@ impl<Space> Buffer<Space> {
             g: &mut self.g[start..end],
             b: &mut self.b[start..end],
             a: &mut self.a[start..end],
+            _space: PhantomData,
         }
     }
 
-    pub fn luma(&self) -> (f32, f32) {
+    pub fn luma(&self) -> (f32, f32)
+    where
+        Space: Luma,
+    {
         let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
 
         for color in self.iter() {
-            let luma = color.luma();
+            let luma = color.demultiply().luma();
             lo = lo.min(luma);
             hi = hi.max(luma);
         }
@@ -681,7 +752,7 @@ impl<Space> Buffer<Space> {
         }
     }
 
-    pub fn put(&mut self, i: usize, color: Color<Linear, Premultiplied>) {
+    pub fn put(&mut self, i: usize, color: Color<Space, Premultiplied>) {
         self.r[i] = color.r;
         self.g[i] = color.g;
         self.b[i] = color.b;
@@ -690,7 +761,7 @@ impl<Space> Buffer<Space> {
 
     pub fn apply(
         &mut self,
-        f: impl Fn(Color<Linear, Premultiplied>) -> Color<Linear, Premultiplied>,
+        f: impl Fn(Color<Space, Premultiplied>) -> Color<Space, Premultiplied>,
     ) {
         let count = self.r.len();
 
@@ -704,7 +775,7 @@ impl<Space> Buffer<Space> {
         }
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = Color<Linear, Premultiplied>> {
+    pub fn iter(&self) -> impl Iterator<Item = Color<Space, Premultiplied>> {
         iter(&self.r, &self.g, &self.b, &self.a)
     }
 }
@@ -721,22 +792,23 @@ impl<Space> Clone for Buffer<Space> {
     }
 }
 
-fn iter<'a>(
+fn iter<'a, Space: 'static>(
     r: &'a [f32],
     g: &'a [f32],
     b: &'a [f32],
     a: &'a [f32],
-) -> impl Iterator<Item = Color<Linear, Premultiplied>> + 'a {
-    struct Iter {
+) -> impl Iterator<Item = Color<Space, Premultiplied>> + 'a {
+    struct Iter<Space> {
         r: *const f32,
         g: *const f32,
         b: *const f32,
         a: *const f32,
         remaining: usize,
+        _space: PhantomData<Space>,
     }
 
-    impl Iterator for Iter {
-        type Item = Color<Linear, Premultiplied>;
+    impl<Space> Iterator for Iter<Space> {
+        type Item = Color<Space, Premultiplied>;
 
         fn next(&mut self) -> Option<Self::Item> {
             if self.remaining == 0 {
@@ -775,22 +847,24 @@ fn iter<'a>(
         b: b.as_ptr(),
         a: a.as_ptr(),
         remaining: r.len(),
+        _space: PhantomData,
     }
 }
 
-pub struct ColorMut<'a> {
+pub struct ColorMut<'a, Space> {
     r: &'a mut f32,
     g: &'a mut f32,
     b: &'a mut f32,
     a: &'a mut f32,
+    _space: PhantomData<Space>,
 }
 
-impl ColorMut<'_> {
-    pub fn color(&self) -> Color<Linear, Premultiplied> {
+impl<Space> ColorMut<'_, Space> {
+    pub fn color(&self) -> Color<Space, Premultiplied> {
         Color::from_rgba([*self.r, *self.g, *self.b, *self.a])
     }
 
-    pub fn put(&mut self, color: Color<Linear, Premultiplied>) {
+    pub fn put(&mut self, color: Color<Space, Premultiplied>) {
         *self.r = color.r;
         *self.g = color.g;
         *self.b = color.b;
@@ -798,23 +872,23 @@ impl ColorMut<'_> {
     }
 }
 
-fn iter_mut<'a>(
+fn iter_mut<'a, Space: 'static>(
     r: &'a mut [f32],
     g: &'a mut [f32],
     b: &'a mut [f32],
     a: &'a mut [f32],
-) -> impl Iterator<Item = ColorMut<'a>> + 'a {
-    struct IterMut<'a> {
+) -> impl Iterator<Item = ColorMut<'a, Space>> + 'a {
+    struct IterMut<'a, Space> {
         r: *mut f32,
         g: *mut f32,
         b: *mut f32,
         a: *mut f32,
         remaining: usize,
-        _borrow: PhantomData<&'a mut f32>,
+        _space: PhantomData<&'a Space>,
     }
 
-    impl<'a> Iterator for IterMut<'a> {
-        type Item = ColorMut<'a>;
+    impl<'a, Space> Iterator for IterMut<'a, Space> {
+        type Item = ColorMut<'a, Space>;
 
         fn next(&mut self) -> Option<Self::Item> {
             if self.remaining == 0 {
@@ -829,6 +903,7 @@ fn iter_mut<'a>(
                     g: &mut *self.g,
                     b: &mut *self.b,
                     a: &mut *self.a,
+                    _space: PhantomData,
                 };
 
                 self.r = self.r.add(1);
@@ -851,7 +926,7 @@ fn iter_mut<'a>(
         b: b.as_mut_ptr(),
         a: a.as_mut_ptr(),
         remaining: r.len(),
-        _borrow: PhantomData,
+        _space: PhantomData,
     }
 }
 
@@ -1375,14 +1450,14 @@ mod kernels {
 
 #[cfg(test)]
 mod with_luma {
-    use super::Color;
+    use super::{Color, Linear, Premultiplied, Srgb};
 
     #[test]
     fn the_with_luma_hits_the_target_and_keeps_the_ratios() {
-        let color = Color::from_rgba([0.5, 0.25, 0.125, 1.0]).demultiply();
+        let color = Color::<Linear, Premultiplied>::from_rgba([0.5, 0.25, 0.125, 1.0]).demultiply();
         let result = color.with_luma(0.1);
 
-        assert!((result.premultiply().luma() - 0.1).abs() < 1e-6);
+        assert!((result.luma() - 0.1).abs() < 1e-6);
         assert_eq!(result.g, result.r / 2.0);
         assert_eq!(result.b, result.r / 4.0);
         assert_eq!(result.a, 1.0);
@@ -1390,14 +1465,14 @@ mod with_luma {
 
     #[test]
     fn the_with_luma_keeps_black_black() {
-        let black = Color::from_rgba([0.0, 0.0, 0.0, 1.0]).demultiply();
+        let black = Color::<Linear, Premultiplied>::from_rgba([0.0, 0.0, 0.0, 1.0]).demultiply();
 
         assert_eq!(black.with_luma(0.5), black);
     }
 
     #[test]
     fn the_with_luma_keeps_the_channels_unclamped_until_the_srgb_encode() {
-        let result = Color::from_rgba([0.0, 0.0, 1.0, 1.0])
+        let result = Color::<Linear, Premultiplied>::from_rgba([0.0, 0.0, 1.0, 1.0])
             .demultiply()
             .with_luma(0.3);
 
@@ -1407,10 +1482,35 @@ mod with_luma {
 
     #[test]
     fn the_with_luma_clamps_the_target_to_zero_and_one() {
-        let white = Color::from_rgba([1.0, 1.0, 1.0, 1.0]).demultiply();
+        let white = Color::<Linear, Premultiplied>::from_rgba([1.0, 1.0, 1.0, 1.0]).demultiply();
 
         assert_eq!(white.with_luma(-1.0).r, 0.0);
         assert_eq!(white.with_luma(2.0), white);
+    }
+
+    #[test]
+    fn the_srgb_luma_decodes_to_linear_before_weighting() {
+        let white = Color::<Srgb, Premultiplied>::from_rgba([1.0, 1.0, 1.0, 1.0]).demultiply();
+        assert!((white.luma() - 1.0).abs() < 1e-6);
+
+        let gray = Color::<Srgb, Premultiplied>::from_rgba([0.5, 0.5, 0.5, 1.0]).demultiply();
+        assert!((gray.luma() - 0.214041).abs() < 1e-4);
+    }
+
+    #[test]
+    fn the_srgb_with_luma_hits_the_target_in_linear_light() {
+        let color = Color::<Srgb, Premultiplied>::from_rgba([0.5, 0.25, 0.125, 1.0]).demultiply();
+        let result = color.with_luma(0.1);
+
+        assert!((result.luma() - 0.1).abs() < 1e-6);
+        assert_eq!(result.a, 1.0);
+    }
+
+    #[test]
+    fn the_srgb_with_luma_keeps_black_black() {
+        let black = Color::<Srgb, Premultiplied>::from_rgba([0.0, 0.0, 0.0, 1.0]).demultiply();
+
+        assert_eq!(black.with_luma(0.5), black);
     }
 }
 

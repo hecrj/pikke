@@ -65,7 +65,7 @@ impl Stream {
         })
     }
 
-    pub fn frame(&mut self) -> Result<Option<Image>> {
+    pub fn frame(&mut self) -> Result<Option<Image<color::Linear>>> {
         if self.drain.is_none() {
             return Err(io::Error::other(format!("stream: {} has ended", self.program)).into());
         }

@@ -4,26 +4,29 @@ use std::process::{ChildStderr, Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
 
-use crate::{Error, Image, Result};
+use crate::color;
+
+use crate::{Error, Result};
 
 const STDERR_TAIL: usize = 1 << 20;
 
-#[derive(Debug)]
 pub struct Video {
     output: PathBuf,
     frames: usize,
     state: State,
 }
 
-#[derive(Debug, Default)]
+type ToRgba = Box<dyn FnOnce() -> color::Rgba<'static> + Send + Sync + 'static>;
+
+#[derive(Default)]
 enum State {
     #[default]
     Empty,
     Still {
-        frame: Image,
+        frame: ToRgba,
     },
     Encoding {
-        sender: mpsc::SyncSender<Option<Image>>,
+        sender: mpsc::SyncSender<Option<ToRgba>>,
         handle: thread::JoinHandle<Result<()>>,
     },
 }
@@ -37,18 +40,21 @@ impl Video {
         }
     }
 
-    pub fn push(&mut self, frame: &Image) -> Result<()> {
+    pub fn push(
+        &mut self,
+        width: u16,
+        height: u16,
+        frame: impl FnOnce() -> color::Rgba<'static> + Send + Sync + 'static,
+    ) -> Result<()> {
         self.frames += 1;
 
-        match &self.state {
+        match std::mem::take(&mut self.state) {
             State::Empty => {
                 self.state = State::Still {
-                    frame: frame.clone(),
+                    frame: Box::new(frame),
                 };
             }
             State::Still { frame: first } => {
-                let (width, height) = (frame.width(), frame.height());
-
                 if width % 2 == 1 || height % 2 == 1 {
                     return Err(Error::OddDimensions { width, height });
                 }
@@ -56,15 +62,20 @@ impl Video {
                 let (sender, receiver) = mpsc::sync_channel(1);
 
                 let output = self.output.clone();
-                let handle = thread::spawn(move || worker(output, receiver));
+                let handle = thread::spawn(move || worker(output, width, height, receiver));
 
-                sender.send(Some(first.clone())).map_err(io::Error::other)?;
-                sender.send(Some(frame.clone())).map_err(io::Error::other)?;
+                sender.send(Some(first)).map_err(io::Error::other)?;
+                sender
+                    .send(Some(Box::new(frame)))
+                    .map_err(io::Error::other)?;
 
                 self.state = State::Encoding { sender, handle }
             }
-            State::Encoding { sender, .. } => {
-                sender.send(Some(frame.clone())).map_err(io::Error::other)?;
+            State::Encoding { sender, handle } => {
+                sender
+                    .send(Some(Box::new(frame)))
+                    .map_err(io::Error::other)?;
+                self.state = State::Encoding { sender, handle };
             }
         }
 
@@ -86,16 +97,12 @@ impl Video {
     }
 }
 
-fn worker(output: PathBuf, receiver: mpsc::Receiver<Option<Image>>) -> Result<()> {
-    let mut frames = receiver.iter().peekable();
-
-    let first = match frames.peek().cloned().flatten() {
-        Some(frame) => frame,
-        None => return Ok(()),
-    };
-
-    let (width, height) = (first.width(), first.height());
-
+fn worker(
+    output: PathBuf,
+    width: u16,
+    height: u16,
+    receiver: mpsc::Receiver<Option<ToRgba>>,
+) -> Result<()> {
     let file_name = output
         .file_name()
         .ok_or_else(|| io::Error::other(format!("invalid output path: {}", output.display())))?;
@@ -144,12 +151,13 @@ fn worker(output: PathBuf, receiver: mpsc::Receiver<Option<Image>>) -> Result<()
     let stderr = child.stderr.take().unwrap();
     let (tail, drain) = drain_stderr(stderr);
     let mut stdin = child.stdin.take().unwrap();
+    let mut frames = receiver.iter();
 
     loop {
         match frames.next() {
             Some(frame) => {
                 if let Some(frame) = frame
-                    && stdin.write_all(&frame.to_rgba8()).is_ok()
+                    && stdin.write_all(frame().as_slice()).is_ok()
                 {
                     continue;
                 }
@@ -223,12 +231,12 @@ mod tests {
     use crate::color;
     use crate::{Image, Scale, Viewport};
 
-    fn frame(width: u16, height: u16, value: u8) -> Image {
+    fn frame(width: u16, height: u16, value: u8) -> Image<color::Linear> {
         let viewport =
             Viewport::from_logical(f32::from(width), f32::from(height), Scale::default()).unwrap();
         let rgba = [value, value, value, 255].repeat((width as usize) * (height as usize));
 
-        Image::from_buffer(
+        Image::<color::Linear>::from_buffer(
             viewport,
             color::Buffer::from_rgba::<color::Straight>(rgba.as_slice()),
         )
@@ -271,7 +279,9 @@ mod tests {
         let mut video = Video::new(&output);
 
         for value in 0..3u8 {
-            video.push(&frame(32, 24, value * 30)).unwrap();
+            video
+                .push(32, 24, move || frame(32, 24, value * 30).to_rgba8())
+                .unwrap();
         }
 
         assert_eq!(video.finish().unwrap(), 3);
@@ -285,9 +295,12 @@ mod tests {
     fn the_video_rejects_odd_dimensions() {
         let mut video = Video::new(dir("odd").join("odd.mp4"));
 
-        video.push(&frame(32, 24, 0)).unwrap();
+        video.push(32, 24, || frame(32, 24, 0).to_rgba8()).unwrap();
 
-        let error = video.push(&frame(31, 24, 0)).unwrap_err().to_string();
+        let error = video
+            .push(31, 24, || frame(31, 24, 0).to_rgba8())
+            .unwrap_err()
+            .to_string();
 
         assert!(error.contains("even dimensions"), "{error}");
     }
@@ -299,7 +312,9 @@ mod tests {
         let mut video = Video::new(&output);
 
         for value in 0..3u8 {
-            video.push(&frame(32, 24, value * 30)).unwrap();
+            video
+                .push(32, 24, move || frame(32, 24, value * 30).to_rgba8())
+                .unwrap();
         }
 
         let error = video.finish().unwrap_err().to_string();
@@ -314,7 +329,7 @@ mod tests {
 
         let mut video = Video::new(dir.join("still.mp4"));
 
-        video.push(&frame(32, 24, 0)).unwrap();
+        video.push(32, 24, || frame(32, 24, 0).to_rgba8()).unwrap();
 
         assert_eq!(video.finish().unwrap(), 1);
         assert!(!dir.join("still.mp4").exists());

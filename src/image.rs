@@ -1,5 +1,5 @@
 use std::io;
-use std::path::{self, PathBuf};
+use std::path;
 use std::sync::{Arc, Mutex};
 
 use image::{ColorType, ImageFormat};
@@ -16,11 +16,21 @@ use crate::color;
 use crate::lua;
 use crate::{Color, Error, Paint, Path, Rectangle, Result, Scale, Text, Viewport};
 
-#[derive(Debug, Clone)]
-pub struct Image {
-    buffer: Arc<color::Buffer>,
+#[derive(Debug)]
+pub struct Image<Space> {
+    buffer: Arc<color::Buffer<Space>>,
     viewport: Viewport,
     target_scale: Scale,
+}
+
+impl<Space> Clone for Image<Space> {
+    fn clone(&self) -> Self {
+        Self {
+            buffer: self.buffer.clone(),
+            viewport: self.viewport,
+            target_scale: self.target_scale,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -37,20 +47,23 @@ pub enum Mode {
     Cover,
 }
 
-impl Image {
-    pub fn new(scale: Scale, width: f32, height: f32, color: Color) -> Result<Self> {
+impl<Space: 'static> Image<Space> {
+    pub fn new(scale: Scale, width: f32, height: f32, color: Color) -> Result<Self>
+    where
+        color::Linear: color::ToSpace<Space>,
+    {
         let viewport = Viewport::from_logical(width, height, scale)?;
         let count = viewport.total_pixels();
         let color = color.premultiply();
 
         Ok(Self {
-            buffer: Arc::new(color::Buffer::new(color, count)),
+            buffer: Arc::new(color::Buffer::new(color.to_space(), count)),
             viewport,
             target_scale: scale,
         })
     }
 
-    pub fn from_buffer(viewport: Viewport, buffer: color::Buffer) -> Result<Self> {
+    pub fn from_buffer(viewport: Viewport, buffer: color::Buffer<Space>) -> Result<Self> {
         let count = viewport.total_pixels();
 
         if buffer.len() != count {
@@ -69,7 +82,10 @@ impl Image {
         })
     }
 
-    fn load(path: impl AsRef<path::Path>, target_scale: Scale) -> Result<Self> {
+    fn load(path: impl AsRef<path::Path>, target_scale: Scale) -> Result<Self>
+    where
+        color::Srgb: color::ToSpace<Space>,
+    {
         let rgba = image::open(path)?.to_rgba8();
         let (width, height) = (rgba.width(), rgba.height());
 
@@ -96,19 +112,26 @@ impl Image {
         self.viewport.logical_height()
     }
 
-    pub fn to_rgba8(&self) -> Vec<u8> {
+    pub fn to_rgba8(&self) -> color::Rgba<'static>
+    where
+        Space: color::ToSpace<color::Srgb>,
+    {
         let count = self.viewport.total_pixels();
         let mut out = Vec::with_capacity(count * 4);
 
         for i in 0..count {
-            let color = self.buffer.at(i).demultiply().to_srgb().to_rgba8();
+            let color = self.buffer.at(i).to_space().demultiply().to_rgba8();
             out.extend_from_slice(&color);
         }
 
-        out
+        color::Rgba::new(out)
     }
 
-    pub fn autocontrast(&mut self) {
+    pub fn autocontrast(&mut self)
+    where
+        Space: color::Luma + color::ToSpace<color::Linear>,
+        color::Linear: color::ToSpace<Space>,
+    {
         let (lo, hi) = self.buffer.luma();
 
         if hi <= lo {
@@ -117,20 +140,13 @@ impl Image {
 
         let buffer = Arc::make_mut(&mut self.buffer);
 
-        let scale = 1.0 / (hi - lo);
-        let stretch = |value: f32| {
-            if value < lo || value > hi {
-                value
-            } else {
-                (value - lo) * scale
-            }
-        };
-
-        buffer.apply(|mut color| {
-            color.r = stretch(color.r);
-            color.g = stretch(color.g);
-            color.b = stretch(color.b);
+        buffer.apply(|color| {
             color
+                .demultiply()
+                .to_space_fast()
+                .stretch(lo, hi)
+                .to_space_fast()
+                .premultiply()
         });
     }
 
@@ -139,13 +155,20 @@ impl Image {
         buffer.invert();
     }
 
-    pub fn monochrome(&mut self, color: Color) {
+    pub fn monochrome(&mut self, color: Color)
+    where
+        Space: color::ToSpace<color::Linear>,
+        color::Linear: color::ToSpace<Space>,
+    {
         let buffer = Arc::make_mut(&mut self.buffer);
 
         buffer.apply(|pixel| {
             let shade = color.with_alpha(pixel.a);
 
-            shade.with_luma(pixel.luma()).premultiply()
+            shade
+                .with_luma(pixel.demultiply().to_space().luma())
+                .to_space()
+                .premultiply()
         });
     }
 
@@ -214,7 +237,18 @@ impl Image {
         Ok(())
     }
 
-    pub fn blend(&mut self, other: &Image, at: Rectangle, space: color::Space) -> Result<()> {
+    pub fn blend<Layer>(
+        &mut self,
+        other: &Image<Layer>,
+        at: Rectangle,
+        space: color::Space,
+    ) -> Result<()>
+    where
+        Space: color::ToSpace<color::Srgb> + color::ToSpace<color::Linear>,
+        Layer: 'static + color::ToSpace<color::Srgb> + color::ToSpace<color::Linear>,
+        color::Linear: color::ToSpace<Space>,
+        color::Srgb: color::ToSpace<Space>,
+    {
         let scale = self.viewport.scale();
 
         let other = if other.viewport.scale() != scale {
@@ -264,7 +298,12 @@ impl Image {
                         .crop(left as usize, right as usize);
 
                     for (mut base, layer) in base.iter_mut().zip(layer.iter()) {
-                        base.put(base.color().over(layer));
+                        base.put(
+                            base.color()
+                                .to_space::<color::Linear>()
+                                .over(layer.to_space::<color::Linear>())
+                                .to_space::<Space>(),
+                        );
                     }
                 }
             }
@@ -281,13 +320,9 @@ impl Image {
                     for (mut base, layer) in base.iter_mut().zip(layer.iter()) {
                         let blended = base
                             .color()
-                            .demultiply()
-                            .to_srgb_fast()
-                            .premultiply()
-                            .over(layer.demultiply().to_srgb_fast().premultiply())
-                            .demultiply()
-                            .to_linear_fast()
-                            .premultiply();
+                            .to_space_fast::<color::Srgb>()
+                            .over(layer.to_space_fast::<color::Srgb>())
+                            .to_space_fast::<Space>();
 
                         base.put(blended);
                     }
@@ -298,7 +333,10 @@ impl Image {
         Ok(())
     }
 
-    pub fn fill(&mut self, fill: impl Into<Geometry>, paint: impl Into<Paint>) {
+    pub fn fill(&mut self, fill: impl Into<Geometry>, paint: impl Into<Paint>)
+    where
+        color::Linear: color::ToSpace<Space>,
+    {
         let mut resources = Resources::new();
         let mut context = RenderContext::new(self.width(), self.height());
         context.set_paint(AlphaColor::<Srgb>::BLACK);
@@ -366,7 +404,7 @@ impl Image {
                         let base = buffer.at(i);
                         let layer = color.scale(cover);
 
-                        buffer.put(i, base.over(layer));
+                        buffer.put(i, base.over(layer.to_space()));
                     }
                 }
             }
@@ -398,14 +436,18 @@ impl Image {
                         let base = buffer.at(i);
                         let layer = color.premultiply().scale(cover);
 
-                        buffer.put(i, base.over(layer));
+                        buffer.put(i, base.over(layer.to_space()));
                     }
                 }
             }
         }
     }
 
-    pub fn fill_text(&mut self, text: &Text, paint: impl Into<Paint>) -> Result<()> {
+    pub fn fill_text(&mut self, text: &Text, paint: impl Into<Paint>) -> Result<()>
+    where
+        Space: color::ToSpace<color::Srgb>,
+        color::Srgb: color::ToSpace<Space>,
+    {
         let (box_width, box_height) = (text.viewport.width(), text.viewport.height());
 
         if box_width == 0 || box_height == 0 {
@@ -543,13 +585,9 @@ impl Image {
                 };
 
                 let blended = base
-                    .demultiply()
-                    .to_srgb()
-                    .premultiply()
+                    .to_space::<color::Srgb>()
                     .over(layer.demultiply().to_srgb().premultiply())
-                    .demultiply()
-                    .to_linear()
-                    .premultiply();
+                    .to_space::<Space>();
 
                 buffer.put(i, blended);
             }
@@ -558,7 +596,10 @@ impl Image {
         Ok(())
     }
 
-    pub fn pixel(&self, x: f32, y: f32) -> Result<Option<color::Pixel>> {
+    pub fn pixel(&self, x: f32, y: f32) -> Result<Option<color::Pixel>>
+    where
+        Space: color::ToSpace<color::Srgb>,
+    {
         let scale = self.viewport.scale();
         let left = scale.to_physical_signed(x)?;
         let top = scale.to_physical_signed(y)?;
@@ -571,12 +612,15 @@ impl Image {
             self.buffer
                 .at((top * self.width() as i32 + left) as usize)
                 .demultiply()
-                .to_srgb()
+                .to_space()
                 .to_pixel(),
         ))
     }
 
-    pub fn luma_in(&self, region: Rectangle) -> Result<f32> {
+    pub fn luma_in(&self, region: Rectangle) -> Result<f32>
+    where
+        Space: color::Luma,
+    {
         let scale = self.viewport.scale();
         let left = scale.to_physical_signed(region.x)?;
         let top = scale.to_physical_signed(region.y)?;
@@ -600,7 +644,7 @@ impl Image {
             let row = self.buffer.row(row, width).crop(left, right);
 
             for color in row.iter() {
-                luma += color.luma();
+                luma += color.demultiply().luma();
             }
         }
 
@@ -609,7 +653,10 @@ impl Image {
         Ok(luma / count as f32 * 255.0)
     }
 
-    pub fn dominant_in(&self, region: Rectangle) -> Result<Color> {
+    pub fn dominant_in(&self, region: Rectangle) -> Result<Color>
+    where
+        Space: color::ToSpace<color::Linear>,
+    {
         #[derive(Clone, Default)]
         struct Bucket {
             weight: f32,
@@ -643,6 +690,7 @@ impl Image {
             let row = self.buffer.row(row, width).crop(left, right);
 
             for color in row.iter() {
+                let color = color.to_space();
                 let a = color.a;
 
                 if a > 0.0 {
@@ -723,7 +771,10 @@ impl Image {
         Ok(covered)
     }
 
-    pub fn write(&self, output: &path::Path) -> Result<()> {
+    pub fn write(&self, output: &path::Path) -> Result<()>
+    where
+        Space: color::ToSpace<color::Srgb>,
+    {
         let file_name = output.file_name().ok_or_else(|| {
             io::Error::other(format!("invalid output path: {}", output.display()))
         })?;
@@ -735,7 +786,7 @@ impl Image {
         let rgba8 = self.to_rgba8();
         image::save_buffer_with_format(
             &temp,
-            &rgba8,
+            rgba8.as_slice(),
             u32::from(self.width()),
             u32::from(self.height()),
             ColorType::Rgba8,
@@ -751,32 +802,41 @@ impl Image {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Reference(Arc<Mutex<Thunk>>);
+pub struct Reference<Space>(Arc<Mutex<Thunk<Space>>>);
 
-impl Reference {
-    pub fn new(image: Image) -> Self {
+impl<Space> Clone for Reference<Space> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<Space: 'static> Reference<Space> {
+    pub fn new(image: Image<Space>) -> Self {
         Self(Arc::new(Mutex::new(Thunk::Image(image))))
     }
 
-    pub fn image(&self) -> Result<Image> {
+    pub fn image(&self) -> Result<Image<Space>> {
         self.evaluate(|image| Ok(image.clone()))
     }
 
-    fn blank(scale: Scale, width: f32, height: f32, color: Color) -> Self {
-        Self(Arc::new(Mutex::new(Thunk::Blank {
-            scale,
-            width,
-            height,
-            color,
-        })))
+    fn blank(scale: Scale, width: f32, height: f32, color: Color) -> Self
+    where
+        color::Linear: color::ToSpace<Space>,
+    {
+        Self(Arc::new(Mutex::new(Thunk::Computation(Arc::new(
+            move || Image::new(scale, width, height, color),
+        )))))
     }
 
-    fn load(path: impl AsRef<path::Path>, scale: Scale) -> Self {
-        Self(Arc::new(Mutex::new(Thunk::File {
-            path: path.as_ref().to_path_buf(),
-            scale,
-        })))
+    fn load(path: impl AsRef<path::Path>, scale: Scale) -> Self
+    where
+        color::Srgb: color::ToSpace<Space>,
+    {
+        let path = path.as_ref().to_path_buf();
+
+        Self(Arc::new(Mutex::new(Thunk::Computation(Arc::new(
+            move || Image::load(&path, scale),
+        )))))
     }
 
     fn resize(
@@ -786,50 +846,72 @@ impl Reference {
         mode: Mode,
         scale: Option<Scale>,
     ) {
-        self.replace(|source| Thunk::Resize {
-            source,
-            dimension,
-            filter,
-            mode,
-            scale,
-        });
+        self.replace(move |source| source.resize(dimension, filter, mode, scale));
     }
 
-    fn autocontrast(&mut self) {
-        self.replace(|source| Thunk::Autocontrast { source });
+    fn autocontrast(&mut self)
+    where
+        Space: color::Luma + color::ToSpace<color::Linear>,
+        color::Linear: color::ToSpace<Space>,
+    {
+        self.replace(|source| {
+            source.autocontrast();
+            Ok(())
+        });
     }
 
     fn invert(&mut self) {
-        self.replace(|source| Thunk::Invert { source });
-    }
-
-    fn monochrome(&mut self, color: Color) {
-        self.replace(|source| Thunk::Monochrome { source, color });
-    }
-
-    fn blend(&mut self, other: &Reference, at: Rectangle, space: color::Space) {
-        self.replace(|source| Thunk::Blend {
-            source,
-            other: other.clone(),
-            at,
-            space,
+        self.replace(|source| {
+            source.invert();
+            Ok(())
         });
     }
 
-    fn fill(&mut self, geometry: impl Into<Geometry>, paint: impl Into<Paint>) {
-        self.replace(|source| Thunk::Fill {
-            source,
-            geometry: geometry.into(),
-            paint: paint.into(),
+    fn monochrome(&mut self, color: Color)
+    where
+        Space: color::ToSpace<color::Linear>,
+        color::Linear: color::ToSpace<Space>,
+    {
+        self.replace(move |source| {
+            source.monochrome(color);
+            Ok(())
         });
     }
 
-    fn fill_text(&mut self, text: &Text, paint: impl Into<Paint>) {
-        self.replace(|source| Thunk::FillText {
-            source,
-            text: text.clone(),
-            paint: paint.into(),
+    fn blend<Layer>(&mut self, other: &Reference<Layer>, at: Rectangle, space: color::Space)
+    where
+        Space: color::ToSpace<color::Srgb> + color::ToSpace<color::Linear>,
+        Layer: 'static + color::ToSpace<color::Srgb> + color::ToSpace<color::Linear>,
+        color::Linear: color::ToSpace<Space>,
+        color::Srgb: color::ToSpace<Space>,
+    {
+        let other = other.clone();
+
+        self.replace(move |source| other.evaluate(move |other| source.blend(other, at, space)));
+    }
+
+    fn fill(&mut self, geometry: impl Into<Geometry>, paint: impl Into<Paint>)
+    where
+        color::Linear: color::ToSpace<Space>,
+    {
+        let geometry = geometry.into();
+        let paint = paint.into();
+
+        self.replace(move |source| {
+            source.fill(geometry.clone(), paint.clone());
+            Ok(())
         });
+    }
+
+    fn fill_text(&mut self, text: &Text, paint: impl Into<Paint>)
+    where
+        Space: color::ToSpace<color::Srgb>,
+        color::Srgb: color::ToSpace<Space>,
+    {
+        let text = text.clone();
+        let paint = paint.into();
+
+        self.replace(move |source| source.fill_text(&text, paint.clone()));
     }
 
     fn logical_width(&self) -> Result<f32> {
@@ -840,15 +922,24 @@ impl Reference {
         self.evaluate(|image| Ok(image.logical_height()))
     }
 
-    fn luma_in(&self, region: Rectangle) -> Result<f32> {
+    fn luma_in(&self, region: Rectangle) -> Result<f32>
+    where
+        Space: color::Luma,
+    {
         self.evaluate(|image| image.luma_in(region))
     }
 
-    fn pixel(&self, x: f32, y: f32) -> Result<Option<color::Pixel>> {
+    fn pixel(&self, x: f32, y: f32) -> Result<Option<color::Pixel>>
+    where
+        Space: color::ToSpace<color::Srgb>,
+    {
         self.evaluate(|image| image.pixel(x, y))
     }
 
-    fn dominant_in(&self, region: Rectangle) -> Result<Color> {
+    fn dominant_in(&self, region: Rectangle) -> Result<Color>
+    where
+        Space: color::ToSpace<color::Linear>,
+    {
         self.evaluate(|image| image.dominant_in(region))
     }
 
@@ -856,7 +947,7 @@ impl Reference {
         self.evaluate(|image| image.coverage_in(region))
     }
 
-    fn evaluate<T>(&self, f: impl FnOnce(&mut Image) -> Result<T>) -> Result<T> {
+    fn evaluate<T>(&self, f: impl FnOnce(&mut Image<Space>) -> Result<T>) -> Result<T> {
         let mut thunk = self.0.lock().expect("lock image reference");
 
         if !matches!(*thunk, Thunk::Image(_)) {
@@ -870,125 +961,42 @@ impl Reference {
         f(image)
     }
 
-    fn replace(&mut self, thunk: impl FnOnce(Self) -> Thunk) {
-        self.0 = Arc::new(Mutex::new(if Arc::strong_count(&self.0) == 1 {
-            thunk(self.clone())
-        } else {
-            thunk(Self(Arc::new(Mutex::new(Thunk::Snapshot(self.clone())))))
-        }));
+    fn replace(&mut self, compute: impl Fn(&mut Image<Space>) -> Result<()> + 'static) {
+        let copy = self.clone();
+
+        self.0 = Arc::new(Mutex::new(Thunk::Computation(
+            if Arc::strong_count(&self.0) == 1 {
+                Arc::new(move || {
+                    copy.evaluate(|image| {
+                        compute(image)?;
+                        Ok(image.clone())
+                    })
+                })
+            } else {
+                Arc::new(move || {
+                    Self(Arc::new(Mutex::new(Thunk::Snapshot(copy.clone())))).evaluate(|image| {
+                        compute(image)?;
+                        Ok(image.clone())
+                    })
+                })
+            },
+        )));
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum Thunk {
-    Blank {
-        scale: Scale,
-        width: f32,
-        height: f32,
-        color: Color,
-    },
-    File {
-        path: PathBuf,
-        scale: Scale,
-    },
-    Image(Image),
-    Snapshot(Reference),
-    Resize {
-        source: Reference,
-        dimension: Dimension,
-        filter: color::Filter,
-        mode: Mode,
-        scale: Option<Scale>,
-    },
-    Autocontrast {
-        source: Reference,
-    },
-    Invert {
-        source: Reference,
-    },
-    Monochrome {
-        source: Reference,
-        color: Color,
-    },
-    Blend {
-        source: Reference,
-        other: Reference,
-        at: Rectangle,
-        space: color::Space,
-    },
-    Fill {
-        source: Reference,
-        geometry: Geometry,
-        paint: Paint,
-    },
-    FillText {
-        source: Reference,
-        text: Text,
-        paint: Paint,
-    },
+#[derive(Clone)]
+pub enum Thunk<Space> {
+    Image(Image<Space>),
+    Snapshot(Reference<Space>),
+    Computation(Arc<dyn Fn() -> Result<Image<Space>>>),
 }
 
-impl Thunk {
-    fn evaluate(&self) -> Result<Image> {
+impl<Space: 'static> Thunk<Space> {
+    fn evaluate(&self) -> Result<Image<Space>> {
         match self {
-            Thunk::Blank {
-                scale,
-                width,
-                height,
-                color,
-            } => Image::new(*scale, *width, *height, *color),
-            Thunk::File { path, scale } => Image::load(path, *scale),
             Thunk::Image(image) => Ok(image.clone()),
             Thunk::Snapshot(reference) => reference.evaluate(|image| Ok(image.clone())),
-            Thunk::Resize {
-                source,
-                dimension,
-                filter,
-                mode,
-                scale,
-            } => source.evaluate(|source| {
-                source.resize(*dimension, *filter, *mode, *scale)?;
-                Ok(source.clone())
-            }),
-            Thunk::Autocontrast { source } => source.evaluate(|source| {
-                source.autocontrast();
-                Ok(source.clone())
-            }),
-            Thunk::Invert { source } => source.evaluate(|source| {
-                source.invert();
-                Ok(source.clone())
-            }),
-            Thunk::Monochrome { source, color } => source.evaluate(|source| {
-                source.monochrome(*color);
-                Ok(source.clone())
-            }),
-            Thunk::Blend {
-                source,
-                other,
-                at,
-                space,
-            } => source.evaluate(|source| {
-                other.evaluate(|other| {
-                    source.blend(other, *at, *space)?;
-                    Ok(source.clone())
-                })
-            }),
-            Thunk::Fill {
-                source,
-                geometry,
-                paint,
-            } => source.evaluate(|source| {
-                source.fill(geometry.clone(), paint.clone());
-                Ok(source.clone())
-            }),
-            Thunk::FillText {
-                source,
-                text,
-                paint,
-            } => source.evaluate(|source| {
-                source.fill_text(text, paint.clone())?;
-                Ok(source.clone())
-            }),
+            Thunk::Computation(compute) => compute(),
         }
     }
 }
@@ -1058,8 +1066,13 @@ impl OutlinePen for PathPen {
     }
 }
 
-impl UserData for Reference {
-    fn add_fields<F: UserDataFields<Reference>>(fields: &mut F) {
+impl<Space: 'static> UserData for Reference<Space>
+where
+    Space: color::Luma + color::ToSpace<color::Linear> + color::ToSpace<color::Srgb>,
+    color::Linear: color::ToSpace<Space>,
+    color::Srgb: color::ToSpace<Space>,
+{
+    fn add_fields<F: UserDataFields<Reference<Space>>>(fields: &mut F) {
         fields.add_meta_field("__name", "Image");
         fields.add_field_method_get("width", |_lua, this| -> mlua::Result<f32> {
             Ok(this.logical_width()?)
@@ -1075,10 +1088,10 @@ impl UserData for Reference {
         });
     }
 
-    fn add_methods<M: UserDataMethods<Reference>>(methods: &mut M) {
+    fn add_methods<M: UserDataMethods<Reference<Space>>>(methods: &mut M) {
         methods.add_method(
             "clone",
-            |_lua, this, _args: ()| -> mlua::Result<Reference> { Ok(this.clone()) },
+            |_lua, this, _args: ()| -> mlua::Result<Reference<Space>> { Ok(this.clone()) },
         );
         methods.add_method_mut("resize", |_lua, this, opts: Table| -> mlua::Result<()> {
             let width: Option<f32> = opts.get("width")?;
@@ -1148,7 +1161,6 @@ impl UserData for Reference {
                     None => lua.create_table()?,
                 };
 
-                let other = other.borrow::<Reference>()?;
                 let at: Option<AnyUserData> = opts.get("at")?;
                 let at = match at {
                     Some(at) => *at.borrow::<Rectangle>()?,
@@ -1165,7 +1177,14 @@ impl UserData for Reference {
                     }
                 };
 
+                if let Ok(other) = other.borrow::<Reference<color::Linear>>() {
+                    this.blend(&other, at, space);
+                    return Ok(());
+                }
+
+                let other = other.borrow::<Reference<color::Srgb>>()?;
                 this.blend(&other, at, space);
+
                 Ok(())
             },
         );
@@ -1229,43 +1248,47 @@ impl UserData for Reference {
 pub fn install(lua: &Lua, env: &Table, scale: Scale) -> Result<()> {
     env.set(
         "image",
-        lua.create_function(move |lua, path: String| -> mlua::Result<Reference> {
-            let module_dir = lua::module_dir(lua);
-            Ok(Reference::load(module_dir.join(&path), scale))
-        })?,
+        lua.create_function(
+            move |lua, path: String| -> mlua::Result<Reference<color::Linear>> {
+                let module_dir = lua::module_dir(lua);
+                Ok(Reference::load(module_dir.join(&path), scale))
+            },
+        )?,
     )?;
     env.set(
         "blank",
-        lua.create_function(move |_lua, opts: Table| -> mlua::Result<Reference> {
-            let width: Option<f32> = opts.get("width")?;
-            let height: Option<f32> = opts.get("height")?;
-            let color: Option<String> = opts.get("color")?;
+        lua.create_function(
+            move |_lua, opts: Table| -> mlua::Result<Reference<color::Linear>> {
+                let width: Option<f32> = opts.get("width")?;
+                let height: Option<f32> = opts.get("height")?;
+                let color: Option<String> = opts.get("color")?;
 
-            let width = width
-                .ok_or_else(|| mlua::Error::RuntimeError("blank: needs 'width'".to_owned()))?;
-            let height = height
-                .ok_or_else(|| mlua::Error::RuntimeError("blank: needs 'height'".to_owned()))?;
+                let width = width
+                    .ok_or_else(|| mlua::Error::RuntimeError("blank: needs 'width'".to_owned()))?;
+                let height = height
+                    .ok_or_else(|| mlua::Error::RuntimeError("blank: needs 'height'".to_owned()))?;
 
-            if width <= 0.0 || !width.is_finite() {
-                return Err(mlua::Error::RuntimeError(
-                    "blank: 'width' must be a positive number".to_owned(),
-                ));
-            }
+                if width <= 0.0 || !width.is_finite() {
+                    return Err(mlua::Error::RuntimeError(
+                        "blank: 'width' must be a positive number".to_owned(),
+                    ));
+                }
 
-            if height <= 0.0 || !height.is_finite() {
-                return Err(mlua::Error::RuntimeError(
-                    "blank: 'height' must be a positive number".to_owned(),
-                ));
-            }
+                if height <= 0.0 || !height.is_finite() {
+                    return Err(mlua::Error::RuntimeError(
+                        "blank: 'height' must be a positive number".to_owned(),
+                    ));
+                }
 
-            let paint = if let Some(color) = color {
-                lua::hex("blank", &color)?
-            } else {
-                Color::TRANSPARENT
-            };
+                let paint = if let Some(color) = color {
+                    lua::hex("blank", &color)?
+                } else {
+                    Color::TRANSPARENT
+                };
 
-            Ok(Reference::blank(scale, width, height, paint))
-        })?,
+                Ok(Reference::blank(scale, width, height, paint))
+            },
+        )?,
     )?;
     Ok(())
 }
@@ -1288,7 +1311,7 @@ mod tests {
         let file_width = u32::from_be_bytes([file[16], file[17], file[18], file[19]]);
         let file_height = u32::from_be_bytes([file[20], file[21], file[22], file[23]]);
 
-        let image = Image::load(&path, Scale::default()).unwrap();
+        let image = Image::<color::Linear>::load(&path, Scale::default()).unwrap();
         assert_eq!(
             (image.logical_width(), image.logical_height()),
             (file_width as f32, file_height as f32)
@@ -1296,16 +1319,16 @@ mod tests {
 
         let count = (file_width * file_height) as usize;
 
-        assert_eq!(image.to_rgba8().len(), count * 4);
+        assert_eq!(image.to_rgba8().as_slice().len(), count * 4);
     }
 
     #[test]
     fn the_blank_paints_the_whole_canvas() -> Result<()> {
         let paint = Color::from_pixel(color::Pixel::from_rgba8([200, 30, 60, 255])).to_linear();
-        let image = Image::new(Scale::default(), 4.0, 2.0, paint)?;
+        let image = Image::<color::Linear>::new(Scale::default(), 4.0, 2.0, paint)?;
 
         assert_eq!((image.width(), image.height()), (4, 2));
-        for pixel in image.to_rgba8().chunks(4) {
+        for pixel in image.to_rgba8().as_slice().chunks(4) {
             assert_eq!(pixel, &[200, 30, 60, 255]);
         }
 
@@ -1315,10 +1338,10 @@ mod tests {
     #[test]
     fn the_blank_sizes_its_buffer_at_the_run_scale() -> Result<()> {
         let paint = Color::from_pixel(color::Pixel::from_rgba8([255, 255, 255, 255])).to_linear();
-        let image = Image::new(Scale::new(0.5), 300.0, 100.0, paint)?;
+        let image = Image::<color::Linear>::new(Scale::new(0.5), 300.0, 100.0, paint)?;
 
         assert_eq!((image.width(), image.height()), (150, 50));
-        assert_eq!(image.to_rgba8().len(), 150 * 50 * 4);
+        assert_eq!(image.to_rgba8().as_slice().len(), 150 * 50 * 4);
         assert_eq!(
             (image.logical_width(), image.logical_height()),
             (300.0, 100.0)
@@ -1330,7 +1353,7 @@ mod tests {
     #[test]
     fn resize_lands_on_its_targets_and_forks() -> Result<()> {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("images/Lenna.png");
-        let mut image = Image::load(&path, Scale::new(0.5)).unwrap();
+        let mut image = Image::<color::Linear>::load(&path, Scale::new(0.5)).unwrap();
         let first_pixel = image.buffer.at(0).r;
 
         let mut fork = image.clone();
@@ -1360,7 +1383,7 @@ mod tests {
         )?;
         assert_eq!((fork.width(), fork.height()), (200, 50));
 
-        let mut image = Image::load(&path, Scale::new(2.0)).unwrap();
+        let mut image = Image::<color::Linear>::load(&path, Scale::new(2.0)).unwrap();
         image.resize(
             Dimension::Both {
                 width: 256.0,
@@ -1399,7 +1422,7 @@ mod tests {
                     Mode::Stretch,
                     None,
                 )?;
-                for pixel in image.to_rgba8().chunks(4) {
+                for pixel in image.to_rgba8().as_slice().chunks(4) {
                     assert_eq!(pixel, &expected);
                 }
             }
@@ -1412,7 +1435,7 @@ mod tests {
     fn the_resize_keeps_the_aspect_for_a_single_dimension() -> Result<()> {
         let color = Color::from_pixel(color::Pixel::from_rgba8([200, 30, 60, 255])).to_linear();
 
-        let mut image = Image::new(Scale::default(), 64.0, 32.0, color)?;
+        let mut image = Image::<color::Linear>::new(Scale::default(), 64.0, 32.0, color)?;
         image.resize(
             Dimension::Width(128.0),
             color::Filter::default(),
@@ -1424,7 +1447,7 @@ mod tests {
             (128.0, 64.0)
         );
 
-        let mut image = Image::new(Scale::default(), 64.0, 32.0, color)?;
+        let mut image = Image::<color::Linear>::new(Scale::default(), 64.0, 32.0, color)?;
         image.resize(
             Dimension::Height(16.0),
             color::Filter::default(),
@@ -1444,7 +1467,7 @@ mod tests {
         let r: [f32; 16] = [
             0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 0.0, 0.1, 0.2, 0.3, 0.4, 0.5,
         ];
-        let mut image = Image {
+        let mut image: Image<color::Linear> = Image {
             buffer: Arc::new(color::Buffer::new(Color::TRANSPARENT, 16)),
             viewport: Viewport::from_physical_u32(4, 4, Scale::default())?,
             target_scale: Scale::default(),
@@ -1503,13 +1526,13 @@ mod tests {
     #[test]
     fn the_luma_in_matches_the_709_mean_on_a_real_image() -> Result<()> {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("images/Lenna.png");
-        let image = Image::load(&path, Scale::default()).unwrap();
+        let image = Image::<color::Linear>::load(&path, Scale::default()).unwrap();
 
         let luma = image.luma_in(Rectangle::new(10.0, 20.0, 100.0, 50.0))?;
 
         let sum: f32 = (20..70)
             .flat_map(|y| (10..110).map(move |x| y * 512 + x))
-            .map(|i| image.buffer.at(i).luma())
+            .map(|i| image.buffer.at(i).demultiply().luma())
             .sum();
         let expected = sum / 5000.0 * 255.0;
         assert!((luma - expected).abs() < 1e-2);
@@ -1520,7 +1543,7 @@ mod tests {
     #[test]
     fn the_luma_in_matches_the_independent_709_mean() -> Result<()> {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("personal/images/sky-night.png");
-        let image = Image::load(&path, Scale::default()).unwrap();
+        let image = Image::<color::Linear>::load(&path, Scale::default()).unwrap();
 
         // Frozen oracles: an independent Python pass (PIL, the IEC 61966-2-1
         // decode, the Rec. 709 mean) over personal/images/sky-night.png.
@@ -1539,7 +1562,7 @@ mod tests {
         let mut rgba = vec![0u8; 16 * 4];
         rgba[..12 * 4].copy_from_slice(&[200, 30, 60, 255].repeat(12));
         rgba[12 * 4..].copy_from_slice(&[0, 0, 255, 255].repeat(4));
-        let image = Image::from_buffer(
+        let image = Image::<color::Linear>::from_buffer(
             viewport,
             color::Buffer::from_rgba::<color::Straight>(rgba.as_slice()),
         )?;
@@ -1555,7 +1578,7 @@ mod tests {
     fn the_dominant_in_blends_the_members_of_its_bucket() -> Result<()> {
         let viewport = Viewport::from_logical(2.0, 1.0, Scale::default())?;
         let rgba = [200, 30, 60, 255, 202, 32, 62, 255];
-        let image = Image::from_buffer(
+        let image = Image::<color::Linear>::from_buffer(
             viewport,
             color::Buffer::from_rgba::<color::Straight>(rgba.as_slice()),
         )?;
@@ -1571,7 +1594,7 @@ mod tests {
     fn the_dominant_in_ignores_the_transparent_pixels() -> Result<()> {
         let viewport = Viewport::from_logical(2.0, 2.0, Scale::default())?;
         let rgba = [0, 255, 0, 255, 255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0];
-        let image = Image::from_buffer(
+        let image = Image::<color::Linear>::from_buffer(
             viewport,
             color::Buffer::from_rgba::<color::Straight>(rgba.as_slice()),
         )?;
@@ -1585,7 +1608,7 @@ mod tests {
 
     #[test]
     fn the_dominant_in_is_transparent_outside_the_image_or_on_a_transparent_region() -> Result<()> {
-        let image = Image::new(Scale::default(), 4.0, 4.0, Color::TRANSPARENT)?;
+        let image = Image::<color::Linear>::new(Scale::default(), 4.0, 4.0, Color::TRANSPARENT)?;
 
         assert_eq!(
             image.dominant_in(Rectangle::new(0.0, 0.0, 4.0, 4.0))?,
@@ -1599,7 +1622,7 @@ mod tests {
         Ok(())
     }
 
-    fn synthetic_linear(pixels: &[[f32; 4]], scale: Scale) -> Result<Image> {
+    fn synthetic_linear(pixels: &[[f32; 4]], scale: Scale) -> Result<Image<color::Linear>> {
         let count = pixels.len();
         let mut image = Image {
             buffer: Arc::new(color::Buffer::new(Color::TRANSPARENT, count)),
@@ -1614,7 +1637,7 @@ mod tests {
         Ok(image)
     }
 
-    fn square(color: [f32; 4], size: u32, scale: Scale) -> Result<Image> {
+    fn square(color: [f32; 4], size: u32, scale: Scale) -> Result<Image<color::Linear>> {
         let count = (size * size) as usize;
         Ok(Image {
             buffer: Arc::new(color::Buffer::new(Color::from_rgba(color), count)),
@@ -1635,8 +1658,12 @@ mod tests {
         let mut image = synthetic_linear(&pixels, Scale::default())?;
         image.autocontrast();
 
-        let lo = Color::from_rgba([0.3, 0.3, 0.3, 1.0]).luma();
-        let hi = Color::from_rgba([0.7, 0.7, 0.7, 1.0]).luma();
+        let lo = Color::<color::Linear, color::Premultiplied>::from_rgba([0.3, 0.3, 0.3, 1.0])
+            .demultiply()
+            .luma();
+        let hi = Color::<color::Linear, color::Premultiplied>::from_rgba([0.7, 0.7, 0.7, 1.0])
+            .demultiply()
+            .luma();
         let scale = 1.0 / (hi - lo);
 
         for (i, pixel) in pixels.iter().enumerate() {
@@ -1683,14 +1710,14 @@ mod tests {
     #[test]
     fn the_sky_background_autocontrast_applies_the_ramp() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("personal/images/sky-night.png");
-        let mut image = Image::load(&path, Scale::default()).unwrap();
+        let mut image = Image::<color::Linear>::load(&path, Scale::default()).unwrap();
 
         let count = image.viewport.total_pixels();
         let before: Vec<_> = (0..count).map(|i| image.buffer.at(i)).collect();
 
         let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
         for value in &before {
-            let luma = value.luma();
+            let luma = value.demultiply().luma();
             lo = lo.min(luma);
             hi = hi.max(luma);
         }
@@ -1762,16 +1789,19 @@ mod tests {
     fn the_blend_is_byte_identical_where_the_layer_is_opaque() -> Result<()> {
         let lenna = Path::new(env!("CARGO_MANIFEST_DIR")).join("images/Lenna.png");
         let sky = Path::new(env!("CARGO_MANIFEST_DIR")).join("personal/images/sky-night.png");
-        let mut base = Image::load(&sky, Scale::default()).unwrap();
+        let mut base = Image::<color::Linear>::load(&sky, Scale::default()).unwrap();
         let before = base.to_rgba8();
-        let layer = Image::load(&lenna, Scale::default()).unwrap();
+        let before = before.as_slice();
+        let layer = Image::<color::Linear>::load(&lenna, Scale::default()).unwrap();
         let (base_width, base_height) = (base.width() as usize, base.height() as usize);
         let (layer_width, layer_height) = (layer.width() as usize, layer.height() as usize);
 
         base.blend(&layer, Rectangle::default(), color::Space::Linear)?;
 
         let after = base.to_rgba8();
+        let after = after.as_slice();
         let layer = layer.to_rgba8();
+        let layer = layer.as_slice();
         for y in 0..base_height {
             for x in 0..base_width {
                 let pixel = (y * base_width + x) * 4;
@@ -1792,8 +1822,8 @@ mod tests {
         let lenna = Path::new(env!("CARGO_MANIFEST_DIR")).join("images/Lenna.png");
         let mask =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("personal/images/Card_Mask_Standard.png");
-        let mut base = Image::load(&lenna, Scale::default()).unwrap();
-        let layer = Image::load(&mask, Scale::default()).unwrap();
+        let mut base = Image::<color::Linear>::load(&lenna, Scale::default()).unwrap();
+        let layer = Image::<color::Linear>::load(&mask, Scale::default()).unwrap();
         let (base_width, base_height) = (base.width() as usize, base.height() as usize);
         let layer_width = layer.width() as usize;
 
@@ -1807,6 +1837,7 @@ mod tests {
         base.blend(&layer, Rectangle::default(), color::Space::Linear)?;
 
         let actual = base.to_rgba8();
+        let actual = actual.as_slice();
         for y in 0..base_height {
             for x in 0..base_width {
                 let i = y * base_width + x;
@@ -1835,6 +1866,7 @@ mod tests {
             color::Space::Linear,
         )?;
         let rgba = base.to_rgba8();
+        let rgba = rgba.as_slice();
         assert_eq!(&rgba[0..4], &[255, 255, 255, 255]);
         for i in 1..16 {
             assert_eq!(&rgba[i * 4..i * 4 + 4], &[0, 0, 0, 255]);
@@ -1847,6 +1879,7 @@ mod tests {
             color::Space::Linear,
         )?;
         let rgba = base.to_rgba8();
+        let rgba = rgba.as_slice();
         for i in 0..15 {
             assert_eq!(&rgba[i * 4..i * 4 + 4], &[0, 0, 0, 255]);
         }
@@ -1889,8 +1922,9 @@ mod tests {
     #[test]
     fn the_blend_resamples_the_file_scale_layer() -> Result<()> {
         let lenna = Path::new(env!("CARGO_MANIFEST_DIR")).join("images/Lenna.png");
-        let mut base = Image::new(Scale::new(0.5), 512.0, 512.0, Color::TRANSPARENT)?;
-        let layer = Image::load(&lenna, Scale::new(0.5)).unwrap();
+        let mut base =
+            Image::<color::Linear>::new(Scale::new(0.5), 512.0, 512.0, Color::TRANSPARENT)?;
+        let layer = Image::<color::Linear>::load(&lenna, Scale::new(0.5)).unwrap();
 
         base.blend(&layer, Rectangle::default(), color::Space::Linear)?;
 
@@ -1904,19 +1938,21 @@ mod tests {
             Mode::Stretch,
             Some(Scale::new(0.5)),
         )?;
-        assert_eq!(base.to_rgba8(), expected.to_rgba8());
+        assert_eq!(base.to_rgba8().as_slice(), expected.to_rgba8().as_slice());
 
         Ok(())
     }
 
     #[test]
     fn the_fill_paints_an_aligned_region_exactly() -> Result<()> {
-        let mut image = Image::new(Scale::default(), 8.0, 8.0, Color::TRANSPARENT)?;
+        let mut image =
+            Image::<color::Linear>::new(Scale::default(), 8.0, 8.0, Color::TRANSPARENT)?;
         let paint = Color::from_pixel(color::Pixel::from_rgba8([128, 160, 192, 255])).to_linear();
 
         image.fill(Rectangle::new(1.0, 2.0, 4.0, 3.0), paint);
 
         let painted = image.to_rgba8();
+        let painted = painted.as_slice();
         for y in 0..8u32 {
             for x in 0..8u32 {
                 let pixel = (y * 8 + x) as usize * 4;
@@ -1935,7 +1971,8 @@ mod tests {
 
     #[test]
     fn the_fill_snaps_fractional_edges_to_the_pixel_grid() -> Result<()> {
-        let mut image = Image::new(Scale::default(), 4.0, 4.0, Color::TRANSPARENT)?;
+        let mut image =
+            Image::<color::Linear>::new(Scale::default(), 4.0, 4.0, Color::TRANSPARENT)?;
         let paint = Color::from_pixel(color::Pixel::from_rgba8([255, 0, 0, 255])).to_linear();
 
         image.fill(Rectangle::new(0.5, 0.5, 3.0, 3.0), paint);
@@ -1944,6 +1981,7 @@ mod tests {
             0, 0, 0, 0, 0, 255, 255, 255, 0, 255, 255, 255, 0, 255, 255, 255,
         ];
         let painted = image.to_rgba8();
+        let painted = painted.as_slice();
         for (i, coverage) in coverages.iter().enumerate() {
             let cover = *coverage as f32 / 255.0;
             let expected = Color::from_rgba([paint.r * cover, 0.0, 0.0, cover])
@@ -1958,7 +1996,8 @@ mod tests {
 
     #[test]
     fn the_fill_snaps_at_the_run_scale() -> Result<()> {
-        let mut image = Image::new(Scale::new(0.5), 16.0, 16.0, Color::TRANSPARENT)?;
+        let mut image =
+            Image::<color::Linear>::new(Scale::new(0.5), 16.0, 16.0, Color::TRANSPARENT)?;
         let paint = Color::from_pixel(color::Pixel::from_rgba8([0, 255, 255, 255])).to_linear();
 
         image.fill(Rectangle::new(0.5, 0.5, 3.0, 3.0), paint);
@@ -1969,6 +2008,7 @@ mod tests {
             0, 0, 0, 0, 0, 0, 0, 0, 0,
         ];
         let painted = image.to_rgba8();
+        let painted = painted.as_slice();
         for (i, coverage) in coverages.iter().enumerate() {
             let cover = *coverage as f32 / 255.0;
             let expected = Color::from_rgba([0.0, paint.g * cover, paint.b * cover, cover])
@@ -1983,7 +2023,8 @@ mod tests {
 
     #[test]
     fn the_fill_is_a_no_op_for_degenerate_regions() -> Result<()> {
-        let mut image = Image::new(Scale::default(), 4.0, 4.0, Color::TRANSPARENT)?;
+        let mut image =
+            Image::<color::Linear>::new(Scale::default(), 4.0, 4.0, Color::TRANSPARENT)?;
         let paint = Color::from_pixel(color::Pixel::from_rgba8([255, 255, 255, 255])).to_linear();
 
         image.fill(Rectangle::new(0.0, 0.0, 0.0, 0.0), paint);
@@ -1991,6 +2032,7 @@ mod tests {
         image.fill(Rectangle::new(f32::NAN, 0.0, 2.0, 2.0), paint);
 
         let painted = image.to_rgba8();
+        let painted = painted.as_slice();
         assert!(painted.iter().all(|&byte| byte == 0));
 
         Ok(())
@@ -1998,7 +2040,8 @@ mod tests {
 
     #[test]
     fn the_fill_path_paints_the_aligned_path_exactly() -> Result<()> {
-        let mut image = Image::new(Scale::default(), 10.0, 10.0, Color::TRANSPARENT)?;
+        let mut image =
+            Image::<color::Linear>::new(Scale::default(), 10.0, 10.0, Color::TRANSPARENT)?;
         let paint = Color::from_pixel(color::Pixel::from_rgba8([255, 255, 255, 255])).to_linear();
 
         let mut path = crate::path::Path::new();
@@ -2010,6 +2053,7 @@ mod tests {
         image.fill(path, paint);
 
         let painted = image.to_rgba8();
+        let painted = painted.as_slice();
         let pixel = |x: usize, y: usize| {
             let i = (y * 10 + x) * 4;
             painted[i..i + 4].to_vec()
@@ -2025,7 +2069,8 @@ mod tests {
 
     #[test]
     fn the_fill_path_is_a_no_op_for_degenerate_paths() -> Result<()> {
-        let mut image = Image::new(Scale::default(), 4.0, 4.0, Color::TRANSPARENT)?;
+        let mut image =
+            Image::<color::Linear>::new(Scale::default(), 4.0, 4.0, Color::TRANSPARENT)?;
         let paint = Color::from_pixel(color::Pixel::from_rgba8([255, 255, 255, 255])).to_linear();
 
         image.fill(crate::path::Path::new(), paint);
@@ -2037,6 +2082,7 @@ mod tests {
         image.fill(non_finite, paint);
 
         let painted = image.to_rgba8();
+        let painted = painted.as_slice();
         assert!(painted.iter().all(|&byte| byte == 0));
 
         Ok(())
@@ -2057,11 +2103,13 @@ mod tests {
         let text = Text::new(Scale::default(), "Noto Sans", 100.0, 400.0, 10.0, 10.0, "N")?;
         assert!(text.viewport.logical_width() > 0.0 && text.viewport.logical_height() > 0.0);
 
-        let mut image = Image::new(Scale::default(), 200.0, 200.0, Color::TRANSPARENT)?;
+        let mut image =
+            Image::<color::Linear>::new(Scale::default(), 200.0, 200.0, Color::TRANSPARENT)?;
         let paint = Color::from_pixel(color::Pixel::from_rgba8([200, 30, 60, 255])).to_linear();
         image.fill_text(&text, paint)?;
 
         let painted = image.to_rgba8();
+        let painted = painted.as_slice();
         let (box_x, box_y) = (text.x as u32, text.y as u32);
         let (box_width, box_height) = (text.viewport.width() as u32, text.viewport.height() as u32);
         let mut solid = 0;
@@ -2124,7 +2172,8 @@ mod tests {
 
     #[test]
     fn the_fill_text_is_a_no_op_for_degenerate_text() -> Result<()> {
-        let mut image = Image::new(Scale::default(), 4.0, 4.0, Color::TRANSPARENT)?;
+        let mut image =
+            Image::<color::Linear>::new(Scale::default(), 4.0, 4.0, Color::TRANSPARENT)?;
         let paint = Color::from_pixel(color::Pixel::from_rgba8([255, 255, 255, 255])).to_linear();
 
         let empty = Text::new(Scale::default(), "Noto Sans", 100.0, 400.0, 0.0, 0.0, "")?;
@@ -2142,7 +2191,7 @@ mod tests {
         )?;
         image.fill_text(&unregistered, paint)?;
 
-        assert!(image.to_rgba8().iter().all(|&byte| byte == 0));
+        assert!(image.to_rgba8().as_slice().iter().all(|&byte| byte == 0));
 
         Ok(())
     }
@@ -2153,11 +2202,13 @@ mod tests {
         let text = Text::new(Scale::default(), "Noto Sans", 100.0, 400.0, -5.0, -5.0, "N")?;
         assert!(text.viewport.logical_width() > 0.0 && text.viewport.logical_height() > 0.0);
 
-        let mut image = Image::new(Scale::default(), 200.0, 200.0, Color::TRANSPARENT)?;
+        let mut image =
+            Image::<color::Linear>::new(Scale::default(), 200.0, 200.0, Color::TRANSPARENT)?;
         let paint = Color::from_pixel(color::Pixel::from_rgba8([200, 30, 60, 255])).to_linear();
         image.fill_text(&text, paint)?;
 
         let painted = image.to_rgba8();
+        let painted = painted.as_slice();
         let mut solid = 0;
         for y in 0..200u32 {
             for x in 0..200u32 {
@@ -2190,10 +2241,11 @@ mod tests {
     #[test]
     fn the_clone_diverges_on_the_first_in_place_write() -> Result<()> {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("images/Lenna.png");
-        let file = Image::load(&path, Scale::default())?;
+        let file = Image::<color::Linear>::load(&path, Scale::default())?;
         let file_pixels = file.to_rgba8();
+        let file_pixels = file_pixels.as_slice();
 
-        let mut reference = Reference::load(&path, Scale::default());
+        let mut reference = Reference::<color::Linear>::load(&path, Scale::default());
         let branch = reference.clone();
 
         assert_eq!(branch.logical_width()?, 512.0);
@@ -2210,7 +2262,7 @@ mod tests {
 
         assert_eq!(reference.logical_width()?, 128.0);
         assert_eq!(branch.logical_width()?, 512.0);
-        assert_eq!(branch.image()?.to_rgba8(), file_pixels);
+        assert_eq!(branch.image()?.to_rgba8().as_slice(), file_pixels);
 
         Ok(())
     }
@@ -2219,13 +2271,13 @@ mod tests {
     fn the_divergent_branches_share_one_load() -> Result<()> {
         let base_color =
             Color::from_pixel(color::Pixel::from_rgba8([200, 30, 60, 255])).to_linear();
-        let source = Image::new(Scale::default(), 32.0, 32.0, base_color)?;
+        let source = Image::<color::Linear>::new(Scale::default(), 32.0, 32.0, base_color)?;
         let file = std::env::temp_dir().join(format!(
             "pikke-image-test-{}-shared-load.png",
             std::process::id()
         ));
 
-        let reference = Reference::load(&file, Scale::default());
+        let reference = Reference::<color::Linear>::load(&file, Scale::default());
         let mut left = reference.clone();
         let mut right = reference.clone();
         left.fill(
@@ -2247,8 +2299,8 @@ mod tests {
         let mut right_row = [200u8, 30, 60, 255].repeat(16);
         right_row.extend([0, 0, 0, 255].repeat(16));
 
-        assert_eq!(left.to_rgba8(), left_row.repeat(32));
-        assert_eq!(right.to_rgba8(), right_row.repeat(32));
+        assert_eq!(left.to_rgba8().as_slice(), left_row.repeat(32).as_slice());
+        assert_eq!(right.to_rgba8().as_slice(), right_row.repeat(32).as_slice());
 
         Ok(())
     }
@@ -2258,8 +2310,8 @@ mod tests {
         let black = Color::from_pixel(color::Pixel::from_rgba8([0, 0, 0, 255])).to_linear();
         let white = Color::from_pixel(color::Pixel::from_rgba8([255, 255, 255, 255])).to_linear();
 
-        let mut base = Reference::blank(Scale::default(), 100.0, 100.0, black);
-        let mut layer = Reference::blank(Scale::default(), 50.0, 50.0, white);
+        let mut base = Reference::<color::Linear>::blank(Scale::default(), 100.0, 100.0, black);
+        let mut layer = Reference::<color::Linear>::blank(Scale::default(), 50.0, 50.0, white);
 
         base.blend(
             &layer,

@@ -4,7 +4,8 @@ use std::sync::Arc;
 use mlua::{AnyUserData, Function, Lua, Table};
 
 use crate::{
-    Error, Result, Scale, Video, color, font, gradient, image, path, point, rectangle, stream, text,
+    Error, Image, Result, Scale, Video, color, font, gradient, image, path, point, rectangle,
+    stream, text,
 };
 
 pub struct Engine {
@@ -109,32 +110,55 @@ impl Engine {
                 .create_function_mut(move |lua, frame: AnyUserData| -> mlua::Result<()> {
                     frame_number += 1;
 
-                    let frame = frame.borrow::<image::Reference>()?.image()?;
-                    let width = frame.width();
-                    let height = frame.height();
-
-                    if let Some((run_width, run_height)) = dimensions
-                        && (width != run_width || height != run_height)
+                    fn yield_<Space>(
+                        lua: &mlua::Lua,
+                        output: &Path,
+                        image: Image<Space>,
+                        number: usize,
+                        run: &mut Option<(u16, u16)>,
+                    ) -> mlua::Result<()>
+                    where
+                        Space: Send + Sync + 'static + color::ToSpace<color::Srgb>,
                     {
-                        return Err(mlua::Error::RuntimeError(format!(
-                            "yield: frame {frame_number} is {}×{}, the run is {}×{}",
-                            width, height, run_width, run_height
-                        )));
+                        let width = image.width();
+                        let height = image.height();
+
+                        if let Some((run_width, run_height)) = *run
+                            && (width != run_width || height != run_height)
+                        {
+                            return Err(mlua::Error::RuntimeError(format!(
+                                "yield: frame {number} is {}×{}, the run is {}×{}",
+                                width, height, run_width, run_height
+                            )));
+                        }
+
+                        eprintln!("yield: frame {number} ({width}×{height})",);
+
+                        if number == 1 {
+                            *run = Some((width, height));
+                            image.write(output)?;
+
+                            eprintln!("output: {} ({width}×{height})", output.display(),);
+                        }
+
+                        lua.app_data_mut::<Video>()
+                            .expect("video type must be set")
+                            .push(width, height, move || image.to_rgba8())?;
+
+                        Ok(())
                     }
 
-                    eprintln!("yield: frame {frame_number} ({width}×{height})",);
-
-                    if frame_number == 1 {
-                        dimensions = Some((width, height));
-
-                        frame.write(&output)?;
-
-                        eprintln!("output: {} ({width}×{height})", output.display(),);
+                    if let Ok(frame) = frame.borrow::<image::Reference<color::Linear>>() {
+                        yield_(lua, &output, frame.image()?, frame_number, &mut dimensions)?;
+                    } else {
+                        yield_(
+                            lua,
+                            &output,
+                            frame.borrow::<image::Reference<color::Srgb>>()?.image()?,
+                            frame_number,
+                            &mut dimensions,
+                        )?;
                     }
-
-                    lua.app_data_mut::<Video>()
-                        .expect("video type must be set")
-                        .push(&frame)?;
 
                     lua.gc_collect()?;
                     lua.gc_collect()?;
