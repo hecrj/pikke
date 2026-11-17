@@ -140,7 +140,7 @@ impl<Space: 'static> Image<Space> {
 
         let buffer = Arc::make_mut(&mut self.buffer);
 
-        buffer.apply(|color| color.stretch(lo, hi));
+        buffer.apply(|mut color| color.put(color.color().stretch(lo, hi)));
     }
 
     pub fn invert(&mut self) {
@@ -150,18 +150,16 @@ impl<Space: 'static> Image<Space> {
 
     pub fn monochrome(&mut self, color: Color)
     where
-        Space: color::ToSpace<color::Linear>,
+        Space: color::ToSpace<color::Linear> + color::Luma<color::Premultiplied>,
         color::Linear: color::ToSpace<Space>,
     {
         let buffer = Arc::make_mut(&mut self.buffer);
 
-        buffer.apply(|pixel| {
-            let shade = color.with_alpha(pixel.a);
+        buffer.apply(|mut pixel| {
+            let base = pixel.color();
+            let shade = color.with_alpha(base.a);
 
-            shade
-                .with_luma(pixel.demultiply().to_space().luma())
-                .to_space()
-                .premultiply()
+            pixel.put(shade.with_luma(base.luma()).to_space().premultiply())
         });
     }
 
@@ -862,7 +860,7 @@ impl<Space: 'static> Reference<Space> {
 
     fn monochrome(&mut self, color: Color)
     where
-        Space: color::ToSpace<color::Linear>,
+        Space: color::ToSpace<color::Linear> + color::Luma<color::Premultiplied>,
         color::Linear: color::ToSpace<Space>,
     {
         self.replace(move |source| {

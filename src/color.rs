@@ -781,19 +781,9 @@ impl<Space: 'static> Buffer<Space> {
         self.a[i] = color.a;
     }
 
-    pub fn apply(
-        &mut self,
-        f: impl Fn(Color<Space, Premultiplied>) -> Color<Space, Premultiplied>,
-    ) {
-        let count = self.r.len();
-
-        for i in 0..count {
-            let Color { r, g, b, a, .. } = f(self.at(i));
-
-            self.r[i] = r;
-            self.g[i] = g;
-            self.b[i] = b;
-            self.a[i] = a;
+    pub fn apply(&mut self, f: impl Fn(ColorMut<'_, Space>)) {
+        for color in self.row_mut(0, self.len()).iter_mut() {
+            f(color);
         }
     }
 
