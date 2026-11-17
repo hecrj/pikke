@@ -786,13 +786,39 @@ impl<Space: 'static> Buffer<Space> {
     }
 
     pub fn apply(&mut self, f: impl Fn(ColorMut<'_, Space>)) {
-        for color in self.row_mut(0, self.len()).iter_mut() {
+        for color in self.iter_mut() {
             f(color);
         }
     }
 
     pub fn iter(&self) -> impl Iterator<Item = Color<Space, Premultiplied>> {
         iter(&self.r, &self.g, &self.b, &self.a)
+    }
+
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = ColorMut<'_, Space>> {
+        iter_mut(&mut self.r, &mut self.g, &mut self.b, &mut self.a)
+    }
+
+    pub fn convert<Target>(mut self) -> Buffer<Target>
+    where
+        Space: ToSpace<Target>,
+    {
+        for pixel in self.iter_mut() {
+            let color = pixel.color().to_space();
+
+            *pixel.r = color.r;
+            *pixel.g = color.g;
+            *pixel.b = color.b;
+            *pixel.a = color.a;
+        }
+
+        Buffer {
+            r: self.r,
+            g: self.g,
+            b: self.b,
+            a: self.a,
+            _space: PhantomData,
+        }
     }
 }
 
@@ -803,6 +829,18 @@ impl<Space> Clone for Buffer<Space> {
             g: self.g.clone(),
             b: self.b.clone(),
             a: self.a.clone(),
+            _space: PhantomData,
+        }
+    }
+}
+
+impl<Space> Default for Buffer<Space> {
+    fn default() -> Self {
+        Self {
+            r: Vec::new(),
+            g: Vec::new(),
+            b: Vec::new(),
+            a: Vec::new(),
             _space: PhantomData,
         }
     }

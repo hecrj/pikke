@@ -4,8 +4,7 @@ use std::sync::Arc;
 use mlua::{AnyUserData, Function, Lua, Table};
 
 use crate::{
-    Error, Image, Result, Scale, Video, color, font, gradient, image, path, point, rectangle,
-    stream, text,
+    Error, Result, Scale, Video, color, font, gradient, image, path, point, rectangle, stream, text,
 };
 
 pub struct Engine {
@@ -99,8 +98,8 @@ impl Engine {
             std::fs::create_dir_all(parent)?;
         }
 
-        let mut frame_number = 0;
-        let mut dimensions = None;
+        let mut number = 0;
+        let mut run = None;
 
         self.lua.set_app_data(Video::new(&video));
 
@@ -108,57 +107,35 @@ impl Engine {
             "yield",
             self.lua
                 .create_function_mut(move |lua, frame: AnyUserData| -> mlua::Result<()> {
-                    frame_number += 1;
+                    number += 1;
 
-                    fn yield_<Space>(
-                        lua: &mlua::Lua,
-                        output: &Path,
-                        image: Image<Space>,
-                        number: usize,
-                        run: &mut Option<(u16, u16)>,
-                    ) -> mlua::Result<()>
-                    where
-                        Space: Send + Sync + 'static + color::ToSpace<color::Srgb>,
+                    let frame = frame.borrow::<image::Reference>()?;
+                    let image = frame.image()?;
+
+                    let width = image.width();
+                    let height = image.height();
+
+                    if let Some((run_width, run_height)) = run
+                        && (width != run_width || height != run_height)
                     {
-                        let width = image.width();
-                        let height = image.height();
-
-                        if let Some((run_width, run_height)) = *run
-                            && (width != run_width || height != run_height)
-                        {
-                            return Err(mlua::Error::RuntimeError(format!(
-                                "yield: frame {number} is {}×{}, the run is {}×{}",
-                                width, height, run_width, run_height
-                            )));
-                        }
-
-                        eprintln!("yield: frame {number} ({width}×{height})",);
-
-                        if number == 1 {
-                            *run = Some((width, height));
-                            image.write(output)?;
-
-                            eprintln!("output: {} ({width}×{height})", output.display(),);
-                        }
-
-                        lua.app_data_mut::<Video>()
-                            .expect("video type must be set")
-                            .push(width, height, move || image.to_rgba8())?;
-
-                        Ok(())
+                        return Err(mlua::Error::RuntimeError(format!(
+                            "yield: frame {number} is {}×{}, the run is {}×{}",
+                            width, height, run_width, run_height
+                        )));
                     }
 
-                    if let Ok(frame) = frame.borrow::<image::Reference<color::Linear>>() {
-                        yield_(lua, &output, frame.image()?, frame_number, &mut dimensions)?;
-                    } else {
-                        yield_(
-                            lua,
-                            &output,
-                            frame.borrow::<image::Reference<color::Srgb>>()?.image()?,
-                            frame_number,
-                            &mut dimensions,
-                        )?;
+                    eprintln!("yield: frame {number} ({width}×{height})",);
+
+                    if number == 1 {
+                        run = Some((width, height));
+                        image.write(&output)?;
+
+                        eprintln!("output: {} ({width}×{height})", output.display(),);
                     }
+
+                    lua.app_data_mut::<Video>()
+                        .expect("video type must be set")
+                        .push(width, height, move || image.to_rgba8())?;
 
                     lua.gc_collect()?;
                     lua.gc_collect()?;

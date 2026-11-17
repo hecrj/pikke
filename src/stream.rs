@@ -155,7 +155,8 @@ impl UserData for Stream {
             |lua, this, (): ()| -> mlua::Result<Value> {
                 match this.frame()? {
                     Some(frame) => {
-                        let frame = lua.create_userdata(image::Reference::new(frame))?;
+                        let frame = lua
+                            .create_userdata(image::Reference::new(image::Value::Linear(frame)))?;
                         Ok(frame.to_value())
                     }
                     None => Ok(Value::Nil),

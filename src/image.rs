@@ -1,9 +1,10 @@
 use std::io;
 use std::path;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use image::{ColorType, ImageFormat};
-use mlua::{AnyUserData, Lua, Table, UserData, UserDataFields, UserDataMethods, Value};
+use mlua::{AnyUserData, Lua, Table, UserData, UserDataFields, UserDataMethods};
 use skrifa::outline::{OutlineGlyphCollection, OutlinePen};
 use skrifa::prelude::{FontRef, GlyphId, LocationRef, NormalizedCoord, Size};
 use vello_cpu::kurbo::{Affine, BezPath, Rect};
@@ -29,6 +30,16 @@ impl<Space> Clone for Image<Space> {
             buffer: self.buffer.clone(),
             viewport: self.viewport,
             target_scale: self.target_scale,
+        }
+    }
+}
+
+impl<Space> Default for Image<Space> {
+    fn default() -> Self {
+        Self {
+            buffer: Arc::default(),
+            viewport: Viewport::default(),
+            target_scale: Scale::default(),
         }
     }
 }
@@ -791,42 +802,45 @@ impl<Space: 'static> Image<Space> {
 
         Ok(())
     }
-}
 
-pub struct Reference<Space>(Arc<Mutex<Thunk<Space>>>);
+    pub fn convert<Target>(mut self) -> Image<Target>
+    where
+        Space: color::ToSpace<Target>,
+    {
+        let buffer = std::mem::take(Arc::make_mut(&mut self.buffer));
+        let buffer = buffer.convert::<Target>();
 
-impl<Space> Clone for Reference<Space> {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
+        Image {
+            buffer: Arc::new(buffer),
+            viewport: self.viewport,
+            target_scale: self.target_scale,
+        }
     }
 }
 
-impl<Space: 'static> Reference<Space> {
-    pub fn new(image: Image<Space>) -> Self {
-        Self(Arc::new(Mutex::new(Thunk::Image(image))))
+#[derive(Clone)]
+pub struct Reference(Rc<Mutex<Thunk>>);
+
+impl Reference {
+    pub fn new(image: Value) -> Self {
+        Self(Rc::new(Mutex::new(Thunk::Image(image))))
     }
 
-    pub fn image(&self) -> Result<Image<Space>> {
+    pub fn image(&self) -> Result<Value> {
         self.evaluate(|image| Ok(image.clone()))
     }
 
-    fn blank(scale: Scale, width: f32, height: f32, color: Color) -> Self
-    where
-        color::Linear: color::ToSpace<Space>,
-    {
-        Self(Arc::new(Mutex::new(Thunk::Computation(Arc::new(
-            move || Image::new(scale, width, height, color),
+    fn blank(scale: Scale, width: f32, height: f32, color: Color) -> Self {
+        Self(Rc::new(Mutex::new(Thunk::Computation(Rc::new(
+            move || Image::new(scale, width, height, color).map(Value::Linear),
         )))))
     }
 
-    fn load(path: impl AsRef<path::Path>, scale: Scale) -> Self
-    where
-        color::Srgb: color::ToSpace<Space>,
-    {
+    fn load(path: impl AsRef<path::Path>, scale: Scale) -> Self {
         let path = path.as_ref().to_path_buf();
 
-        Self(Arc::new(Mutex::new(Thunk::Computation(Arc::new(
-            move || Image::load(&path, scale),
+        Self(Rc::new(Mutex::new(Thunk::Computation(Rc::new(
+            move || Image::load(&path, scale).map(Value::Linear),
         )))))
     }
 
@@ -840,11 +854,7 @@ impl<Space: 'static> Reference<Space> {
         self.replace(move |source| source.resize(dimension, filter, mode, scale));
     }
 
-    fn autocontrast(&mut self)
-    where
-        Space: color::Luma<color::Premultiplied> + color::ToSpace<color::Linear>,
-        color::Linear: color::ToSpace<Space>,
-    {
+    fn autocontrast(&mut self) {
         self.replace(|source| {
             source.autocontrast();
             Ok(())
@@ -858,33 +868,20 @@ impl<Space: 'static> Reference<Space> {
         });
     }
 
-    fn monochrome(&mut self, color: Color)
-    where
-        Space: color::ToSpace<color::Linear> + color::Luma<color::Premultiplied>,
-        color::Linear: color::ToSpace<Space>,
-    {
+    fn monochrome(&mut self, color: Color) {
         self.replace(move |source| {
             source.monochrome(color);
             Ok(())
         });
     }
 
-    fn blend<Layer>(&mut self, other: &Reference<Layer>, at: Rectangle, space: color::Space)
-    where
-        Space: color::ToSpace<color::Srgb> + color::ToSpace<color::Linear>,
-        Layer: 'static + color::ToSpace<color::Srgb> + color::ToSpace<color::Linear>,
-        color::Linear: color::ToSpace<Space>,
-        color::Srgb: color::ToSpace<Space>,
-    {
+    fn blend(&mut self, other: &Self, at: Rectangle, space: color::Space) {
         let other = other.clone();
 
         self.replace(move |source| other.evaluate(move |other| source.blend(other, at, space)));
     }
 
-    fn fill(&mut self, geometry: impl Into<Geometry>, paint: impl Into<Paint>)
-    where
-        color::Linear: color::ToSpace<Space>,
-    {
+    fn fill(&mut self, geometry: impl Into<Geometry>, paint: impl Into<Paint>) {
         let geometry = geometry.into();
         let paint = paint.into();
 
@@ -894,15 +891,18 @@ impl<Space: 'static> Reference<Space> {
         });
     }
 
-    fn fill_text(&mut self, text: &Text, paint: impl Into<Paint>)
-    where
-        Space: color::ToSpace<color::Srgb>,
-        color::Srgb: color::ToSpace<Space>,
-    {
+    fn fill_text(&mut self, text: &Text, paint: impl Into<Paint>) {
         let text = text.clone();
         let paint = paint.into();
 
         self.replace(move |source| source.fill_text(&text, paint.clone()));
+    }
+
+    fn convert(&mut self, space: color::Space) {
+        self.replace(move |source| {
+            source.convert(space);
+            Ok(())
+        });
     }
 
     fn logical_width(&self) -> Result<f32> {
@@ -913,24 +913,15 @@ impl<Space: 'static> Reference<Space> {
         self.evaluate(|image| Ok(image.logical_height()))
     }
 
-    fn luma_in(&self, region: Rectangle) -> Result<f32>
-    where
-        Space: color::Luma<color::Premultiplied>,
-    {
+    fn luma_in(&self, region: Rectangle) -> Result<f32> {
         self.evaluate(|image| image.luma_in(region))
     }
 
-    fn pixel(&self, x: f32, y: f32) -> Result<Option<color::Pixel>>
-    where
-        Space: color::ToSpace<color::Srgb>,
-    {
+    fn pixel(&self, x: f32, y: f32) -> Result<Option<color::Pixel>> {
         self.evaluate(|image| image.pixel(x, y))
     }
 
-    fn dominant_in(&self, region: Rectangle) -> Result<Color>
-    where
-        Space: color::ToSpace<color::Linear>,
-    {
+    fn dominant_in(&self, region: Rectangle) -> Result<Color> {
         self.evaluate(|image| image.dominant_in(region))
     }
 
@@ -938,7 +929,7 @@ impl<Space: 'static> Reference<Space> {
         self.evaluate(|image| image.coverage_in(region))
     }
 
-    fn evaluate<T>(&self, f: impl FnOnce(&mut Image<Space>) -> Result<T>) -> Result<T> {
+    fn evaluate<T>(&self, f: impl FnOnce(&mut Value) -> Result<T>) -> Result<T> {
         let mut thunk = self.0.lock().expect("lock image reference");
 
         if !matches!(*thunk, Thunk::Image(_)) {
@@ -952,20 +943,20 @@ impl<Space: 'static> Reference<Space> {
         f(image)
     }
 
-    fn replace(&mut self, compute: impl Fn(&mut Image<Space>) -> Result<()> + 'static) {
+    fn replace(&mut self, compute: impl Fn(&mut Value) -> Result<()> + 'static) {
         let copy = self.clone();
 
-        self.0 = Arc::new(Mutex::new(Thunk::Computation(
-            if Arc::strong_count(&self.0) == 1 {
-                Arc::new(move || {
+        self.0 = Rc::new(Mutex::new(Thunk::Computation(
+            if Rc::strong_count(&self.0) == 1 {
+                Rc::new(move || {
                     copy.evaluate(|image| {
                         compute(image)?;
                         Ok(image.clone())
                     })
                 })
             } else {
-                Arc::new(move || {
-                    Self(Arc::new(Mutex::new(Thunk::Snapshot(copy.clone())))).evaluate(|image| {
+                Rc::new(move || {
+                    Self(Rc::new(Mutex::new(Thunk::Snapshot(copy.clone())))).evaluate(|image| {
                         compute(image)?;
                         Ok(image.clone())
                     })
@@ -976,14 +967,14 @@ impl<Space: 'static> Reference<Space> {
 }
 
 #[derive(Clone)]
-pub enum Thunk<Space> {
-    Image(Image<Space>),
-    Snapshot(Reference<Space>),
-    Computation(Arc<dyn Fn() -> Result<Image<Space>>>),
+pub enum Thunk {
+    Image(Value),
+    Snapshot(Reference),
+    Computation(Rc<dyn Fn() -> Result<Value>>),
 }
 
-impl<Space: 'static> Thunk<Space> {
-    fn evaluate(&self) -> Result<Image<Space>> {
+impl Thunk {
+    fn evaluate(&self) -> Result<Value> {
         match self {
             Thunk::Image(image) => Ok(image.clone()),
             Thunk::Snapshot(reference) => reference.evaluate(|image| Ok(image.clone())),
@@ -1057,15 +1048,172 @@ impl OutlinePen for PathPen {
     }
 }
 
-impl<Space: 'static> UserData for Reference<Space>
-where
-    Space: color::Luma<color::Premultiplied>
-        + color::ToSpace<color::Linear>
-        + color::ToSpace<color::Srgb>,
-    color::Linear: color::ToSpace<Space>,
-    color::Srgb: color::ToSpace<Space>,
-{
-    fn add_fields<F: UserDataFields<Reference<Space>>>(fields: &mut F) {
+#[derive(Debug, Clone)]
+pub enum Value {
+    Linear(Image<color::Linear>),
+    Srgb(Image<color::Srgb>),
+}
+
+impl Value {
+    pub fn width(&self) -> u16 {
+        match self {
+            Value::Linear(image) => image.width(),
+            Value::Srgb(image) => image.width(),
+        }
+    }
+
+    pub fn height(&self) -> u16 {
+        match self {
+            Value::Linear(image) => image.height(),
+            Value::Srgb(image) => image.height(),
+        }
+    }
+
+    pub fn logical_width(&self) -> f32 {
+        match self {
+            Value::Linear(image) => image.logical_width(),
+            Value::Srgb(image) => image.logical_width(),
+        }
+    }
+
+    pub fn logical_height(&self) -> f32 {
+        match self {
+            Value::Linear(image) => image.logical_height(),
+            Value::Srgb(image) => image.logical_height(),
+        }
+    }
+
+    pub fn resize(
+        &mut self,
+        dimension: Dimension,
+        filter: color::Filter,
+        mode: Mode,
+        scale: Option<Scale>,
+    ) -> Result<()> {
+        match self {
+            Value::Linear(image) => image.resize(dimension, filter, mode, scale),
+            Value::Srgb(image) => image.resize(dimension, filter, mode, scale),
+        }
+    }
+
+    pub fn autocontrast(&mut self) {
+        match self {
+            Value::Linear(image) => {
+                image.autocontrast();
+            }
+            Value::Srgb(image) => {
+                image.autocontrast();
+            }
+        }
+    }
+
+    pub fn invert(&mut self) {
+        match self {
+            Value::Linear(image) => {
+                image.invert();
+            }
+            Value::Srgb(image) => {
+                image.invert();
+            }
+        }
+    }
+
+    pub fn monochrome(&mut self, color: Color) {
+        match self {
+            Value::Linear(image) => {
+                image.monochrome(color);
+            }
+            Value::Srgb(image) => {
+                image.monochrome(color);
+            }
+        }
+    }
+
+    fn blend(&mut self, other: &Self, at: Rectangle, space: color::Space) -> Result<()> {
+        match (self, other) {
+            (Value::Linear(a), Value::Linear(b)) => a.blend(b, at, space),
+            (Value::Linear(a), Value::Srgb(b)) => a.blend(b, at, space),
+            (Value::Srgb(a), Value::Linear(b)) => a.blend(b, at, space),
+            (Value::Srgb(a), Value::Srgb(b)) => a.blend(b, at, space),
+        }
+    }
+
+    pub fn fill(&mut self, fill: impl Into<Geometry>, paint: impl Into<Paint>) {
+        match self {
+            Value::Linear(image) => image.fill(fill, paint),
+            Value::Srgb(image) => image.fill(fill, paint),
+        }
+    }
+
+    pub fn fill_text(&mut self, text: &Text, paint: impl Into<Paint>) -> Result<()> {
+        match self {
+            Value::Linear(image) => image.fill_text(text, paint),
+            Value::Srgb(image) => image.fill_text(text, paint),
+        }
+    }
+
+    pub fn convert(&mut self, space: color::Space) {
+        let value = std::mem::take(self);
+
+        *self = match (value, space) {
+            (Value::Linear(image), color::Space::Linear) => Value::Linear(image),
+            (Value::Linear(image), color::Space::Srgb) => Value::Srgb(image.convert()),
+            (Value::Srgb(image), color::Space::Linear) => Value::Srgb(image.convert()),
+            (Value::Srgb(image), color::Space::Srgb) => Value::Srgb(image),
+        };
+    }
+
+    pub fn pixel(&self, x: f32, y: f32) -> Result<Option<color::Pixel>> {
+        match self {
+            Value::Linear(image) => image.pixel(x, y),
+            Value::Srgb(image) => image.pixel(x, y),
+        }
+    }
+
+    pub fn luma_in(&self, region: Rectangle) -> Result<f32> {
+        match self {
+            Value::Linear(image) => image.luma_in(region),
+            Value::Srgb(image) => image.luma_in(region),
+        }
+    }
+
+    pub fn dominant_in(&self, region: Rectangle) -> Result<Color> {
+        match self {
+            Value::Linear(image) => image.dominant_in(region),
+            Value::Srgb(image) => image.dominant_in(region),
+        }
+    }
+
+    pub fn coverage_in(&self, region: Rectangle) -> Result<usize> {
+        match self {
+            Value::Linear(image) => image.coverage_in(region),
+            Value::Srgb(image) => image.coverage_in(region),
+        }
+    }
+
+    pub fn to_rgba8(&self) -> color::Rgba<'static> {
+        match self {
+            Value::Linear(image) => image.to_rgba8(),
+            Value::Srgb(image) => image.to_rgba8(),
+        }
+    }
+
+    pub fn write(&self, output: &path::Path) -> Result<()> {
+        match self {
+            Value::Linear(image) => image.write(output),
+            Value::Srgb(image) => image.write(output),
+        }
+    }
+}
+
+impl Default for Value {
+    fn default() -> Self {
+        Self::Linear(Image::<color::Linear>::default())
+    }
+}
+
+impl UserData for Reference {
+    fn add_fields<F: UserDataFields<Reference>>(fields: &mut F) {
         fields.add_meta_field("__name", "Image");
         fields.add_field_method_get("width", |_lua, this| -> mlua::Result<f32> {
             Ok(this.logical_width()?)
@@ -1081,10 +1229,10 @@ where
         });
     }
 
-    fn add_methods<M: UserDataMethods<Reference<Space>>>(methods: &mut M) {
+    fn add_methods<M: UserDataMethods<Reference>>(methods: &mut M) {
         methods.add_method(
             "clone",
-            |_lua, this, _args: ()| -> mlua::Result<Reference<Space>> { Ok(this.clone()) },
+            |_lua, this, _args: ()| -> mlua::Result<Reference> { Ok(this.clone()) },
         );
         methods.add_method_mut("resize", |_lua, this, opts: Table| -> mlua::Result<()> {
             let width: Option<f32> = opts.get("width")?;
@@ -1140,7 +1288,7 @@ where
         });
         methods.add_method_mut(
             "monochrome",
-            |_lua, this, color: Value| -> mlua::Result<()> {
+            |_lua, this, color: mlua::Value| -> mlua::Result<()> {
                 let color = lua::color("monochrome", &color)?;
                 this.monochrome(color);
                 Ok(())
@@ -1170,12 +1318,7 @@ where
                     }
                 };
 
-                if let Ok(other) = other.borrow::<Reference<color::Linear>>() {
-                    this.blend(&other, at, space);
-                    return Ok(());
-                }
-
-                let other = other.borrow::<Reference<color::Srgb>>()?;
+                let other = other.borrow::<Reference>()?;
                 this.blend(&other, at, space);
 
                 Ok(())
@@ -1183,7 +1326,7 @@ where
         );
         methods.add_method_mut(
             "fill",
-            |_lua, this, (region, paint): (AnyUserData, Value)| -> mlua::Result<()> {
+            |_lua, this, (region, paint): (AnyUserData, mlua::Value)| -> mlua::Result<()> {
                 let paint = lua::paint("fill", &paint)?;
 
                 if let Ok(rectangle) = region.borrow::<Rectangle>() {
@@ -1205,6 +1348,24 @@ where
                 Ok(())
             },
         );
+        methods.add_method_mut(
+            "convert",
+            |_lua, this, color_space: String| -> mlua::Result<()> {
+                let color_space = match color_space.as_str() {
+                    "linear" => color::Space::Linear,
+                    "srgb" => color::Space::Srgb,
+                    other => {
+                        return Err(mlua::Error::RuntimeError(format!(
+                            "convert: unknown color_space: {other}"
+                        )));
+                    }
+                };
+
+                this.convert(color_space);
+                Ok(())
+            },
+        );
+
         methods.add_method(
             "luma_in",
             |_lua, this, region: AnyUserData| -> mlua::Result<f32> {
@@ -1241,47 +1402,43 @@ where
 pub fn install(lua: &Lua, env: &Table, scale: Scale) -> Result<()> {
     env.set(
         "image",
-        lua.create_function(
-            move |lua, path: String| -> mlua::Result<Reference<color::Linear>> {
-                let module_dir = lua::module_dir(lua);
-                Ok(Reference::load(module_dir.join(&path), scale))
-            },
-        )?,
+        lua.create_function(move |lua, path: String| -> mlua::Result<Reference> {
+            let module_dir = lua::module_dir(lua);
+            Ok(Reference::load(module_dir.join(&path), scale))
+        })?,
     )?;
     env.set(
         "blank",
-        lua.create_function(
-            move |_lua, opts: Table| -> mlua::Result<Reference<color::Linear>> {
-                let width: Option<f32> = opts.get("width")?;
-                let height: Option<f32> = opts.get("height")?;
-                let color: Option<String> = opts.get("color")?;
+        lua.create_function(move |_lua, opts: Table| -> mlua::Result<Reference> {
+            let width: Option<f32> = opts.get("width")?;
+            let height: Option<f32> = opts.get("height")?;
+            let color: Option<String> = opts.get("color")?;
 
-                let width = width
-                    .ok_or_else(|| mlua::Error::RuntimeError("blank: needs 'width'".to_owned()))?;
-                let height = height
-                    .ok_or_else(|| mlua::Error::RuntimeError("blank: needs 'height'".to_owned()))?;
+            let width = width
+                .ok_or_else(|| mlua::Error::RuntimeError("blank: needs 'width'".to_owned()))?;
+            let height = height
+                .ok_or_else(|| mlua::Error::RuntimeError("blank: needs 'height'".to_owned()))?;
 
-                if width <= 0.0 || !width.is_finite() {
-                    return Err(mlua::Error::RuntimeError(
-                        "blank: 'width' must be a positive number".to_owned(),
-                    ));
-                }
+            if width <= 0.0 || !width.is_finite() {
+                return Err(mlua::Error::RuntimeError(
+                    "blank: 'width' must be a positive number".to_owned(),
+                ));
+            }
 
-                if height <= 0.0 || !height.is_finite() {
-                    return Err(mlua::Error::RuntimeError(
-                        "blank: 'height' must be a positive number".to_owned(),
-                    ));
-                }
+            if height <= 0.0 || !height.is_finite() {
+                return Err(mlua::Error::RuntimeError(
+                    "blank: 'height' must be a positive number".to_owned(),
+                ));
+            }
 
-                let paint = if let Some(color) = color {
-                    lua::hex("blank", &color)?
-                } else {
-                    Color::TRANSPARENT
-                };
+            let paint = if let Some(color) = color {
+                lua::hex("blank", &color)?
+            } else {
+                Color::TRANSPARENT
+            };
 
-                Ok(Reference::blank(scale, width, height, paint))
-            },
-        )?,
+            Ok(Reference::blank(scale, width, height, paint))
+        })?,
     )?;
     Ok(())
 }
@@ -2238,7 +2395,7 @@ mod tests {
         let file_pixels = file.to_rgba8();
         let file_pixels = file_pixels.as_slice();
 
-        let mut reference = Reference::<color::Linear>::load(&path, Scale::default());
+        let mut reference = Reference::load(&path, Scale::default());
         let branch = reference.clone();
 
         assert_eq!(branch.logical_width()?, 512.0);
@@ -2270,7 +2427,7 @@ mod tests {
             std::process::id()
         ));
 
-        let reference = Reference::<color::Linear>::load(&file, Scale::default());
+        let reference = Reference::load(&file, Scale::default());
         let mut left = reference.clone();
         let mut right = reference.clone();
         left.fill(
@@ -2303,8 +2460,8 @@ mod tests {
         let black = Color::from_pixel(color::Pixel::from_rgba8([0, 0, 0, 255])).to_linear();
         let white = Color::from_pixel(color::Pixel::from_rgba8([255, 255, 255, 255])).to_linear();
 
-        let mut base = Reference::<color::Linear>::blank(Scale::default(), 100.0, 100.0, black);
-        let mut layer = Reference::<color::Linear>::blank(Scale::default(), 50.0, 50.0, white);
+        let mut base = Reference::blank(Scale::default(), 100.0, 100.0, black);
+        let mut layer = Reference::blank(Scale::default(), 50.0, 50.0, white);
 
         base.blend(
             &layer,

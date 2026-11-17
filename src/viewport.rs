@@ -1,6 +1,6 @@
 use crate::{Error, Result, Scale};
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Viewport {
     width: u16,
     height: u16,
