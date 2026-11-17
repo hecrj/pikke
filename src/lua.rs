@@ -94,6 +94,18 @@ pub fn color(operation: &str, value: &Value) -> Result<Color> {
     )))
 }
 
+pub fn color_space(operation: &str, value: &str) -> Result<color::Space> {
+    Ok(match value {
+        "linear" => color::Space::Linear,
+        "srgb" => color::Space::Srgb,
+        other => {
+            return Err(mlua::Error::RuntimeError(format!(
+                "{operation}: unknown color_space: {other}"
+            )));
+        }
+    })
+}
+
 pub fn paint(operation: &str, value: &Value) -> Result<Paint> {
     if value.is_string() {
         return Ok(Paint::Color(color(operation, value)?));

@@ -1,10 +1,9 @@
 local width = 2048
 local height = 2048
 
-local base = blank({ width = width, height = height, color = "#659DFB" })
+local base = blank({ width = width, height = height, color = "#659DFB", color_space = "srgb" })
 local layer = blank({ width = width, height = height, color = "#F6C17B" })
 
-base:convert("srgb")
 layer:convert("srgb")
 
 return {

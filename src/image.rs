@@ -309,7 +309,6 @@ impl<Space: 'static> Image<Space> {
                     }
                 }
             }
-
             color::Space::Srgb => {
                 for y in top..bottom {
                     let layer = other.buffer.row((y - at_y) as usize, other_width);
@@ -830,9 +829,12 @@ impl Reference {
         self.evaluate(|image| Ok(image.clone()))
     }
 
-    fn blank(scale: Scale, width: f32, height: f32, color: Color) -> Self {
+    fn blank(scale: Scale, width: f32, height: f32, color: Color, space: color::Space) -> Self {
         Self(Rc::new(Mutex::new(Thunk::Computation(Rc::new(
-            move || Image::new(scale, width, height, color).map(Value::Linear),
+            move || match space {
+                color::Space::Linear => Image::new(scale, width, height, color).map(Value::Linear),
+                color::Space::Srgb => Image::new(scale, width, height, color).map(Value::Srgb),
+            },
         )))))
     }
 
@@ -1307,19 +1309,16 @@ impl UserData for Reference {
                     Some(at) => *at.borrow::<Rectangle>()?,
                     None => Rectangle::default(),
                 };
-                let color_space: Option<String> = opts.get("color_space")?;
-                let space = match color_space.as_deref() {
-                    None | Some("linear") => color::Space::Linear,
-                    Some("srgb") => color::Space::Srgb,
-                    Some(other) => {
-                        return Err(mlua::Error::RuntimeError(format!(
-                            "blend: unknown color_space: {other}"
-                        )));
-                    }
-                };
+
+                let color_space = opts
+                    .get::<Option<String>>("color_space")?
+                    .as_deref()
+                    .map_or(Ok(color::Space::Linear), |value| {
+                        lua::color_space("blend", value)
+                    })?;
 
                 let other = other.borrow::<Reference>()?;
-                this.blend(&other, at, space);
+                this.blend(&other, at, color_space);
 
                 Ok(())
             },
@@ -1351,15 +1350,7 @@ impl UserData for Reference {
         methods.add_method_mut(
             "convert",
             |_lua, this, color_space: String| -> mlua::Result<()> {
-                let color_space = match color_space.as_str() {
-                    "linear" => color::Space::Linear,
-                    "srgb" => color::Space::Srgb,
-                    other => {
-                        return Err(mlua::Error::RuntimeError(format!(
-                            "convert: unknown color_space: {other}"
-                        )));
-                    }
-                };
+                let color_space = lua::color_space("convert", color_space.as_str())?;
 
                 this.convert(color_space);
                 Ok(())
@@ -1437,7 +1428,14 @@ pub fn install(lua: &Lua, env: &Table, scale: Scale) -> Result<()> {
                 Color::TRANSPARENT
             };
 
-            Ok(Reference::blank(scale, width, height, paint))
+            let color_space = opts
+                .get::<Option<String>>("color_space")?
+                .as_deref()
+                .map_or(Ok(color::Space::Linear), |value| {
+                    lua::color_space("blend", value)
+                })?;
+
+            Ok(Reference::blank(scale, width, height, paint, color_space))
         })?,
     )?;
     Ok(())
@@ -2460,8 +2458,10 @@ mod tests {
         let black = Color::from_pixel(color::Pixel::from_rgba8([0, 0, 0, 255])).to_linear();
         let white = Color::from_pixel(color::Pixel::from_rgba8([255, 255, 255, 255])).to_linear();
 
-        let mut base = Reference::blank(Scale::default(), 100.0, 100.0, black);
-        let mut layer = Reference::blank(Scale::default(), 50.0, 50.0, white);
+        let mut base =
+            Reference::blank(Scale::default(), 100.0, 100.0, black, color::Space::Linear);
+
+        let mut layer = Reference::blank(Scale::default(), 50.0, 50.0, white, color::Space::Linear);
 
         base.blend(
             &layer,
