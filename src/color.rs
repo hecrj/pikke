@@ -312,16 +312,19 @@ pub trait Luma: Sized {
 }
 
 impl Luma for Srgb {
+    #[inline(always)]
     fn luma(color: Color<Self, Straight>) -> f32 {
         Linear::luma(color.to_space())
     }
 
+    #[inline(always)]
     fn with_luma(color: Color<Self, Straight>, luma: f32) -> Color<Self, Straight> {
         Linear::with_luma(color.to_space(), luma).to_space()
     }
 }
 
 impl Luma for Linear {
+    #[inline(always)]
     fn luma(color: Color<Self, Straight>) -> f32 {
         const LUMA_R: f64 = 0.2126;
         const LUMA_G: f64 = 0.7152;
@@ -330,6 +333,7 @@ impl Luma for Linear {
         LUMA_R as f32 * color.r + LUMA_G as f32 * color.g + LUMA_B as f32 * color.b
     }
 
+    #[inline(always)]
     fn with_luma(color: Color<Self, Straight>, luma: f32) -> Color<Self, Straight> {
         let luma = luma.clamp(0.0, 1.0);
         let current = Self::luma(color);
@@ -536,18 +540,21 @@ pub trait ToAlpha<Target>: Sized {
 }
 
 impl<T> ToAlpha<T> for T {
+    #[inline(always)]
     fn to_alpha<Space>(color: Color<Space, Self>) -> Color<Space, T> {
         color
     }
 }
 
 impl ToAlpha<Premultiplied> for Straight {
+    #[inline(always)]
     fn to_alpha<Space>(color: Color<Space, Self>) -> Color<Space, Premultiplied> {
         color.premultiply()
     }
 }
 
 impl ToAlpha<Straight> for Premultiplied {
+    #[inline(always)]
     fn to_alpha<Space>(color: Color<Space, Self>) -> Color<Space, Straight> {
         color.demultiply()
     }
@@ -562,6 +569,7 @@ where
         Alpha: ToAlpha<Straight>,
         Straight: ToAlpha<Alpha>;
 
+    #[inline(always)]
     fn to_space_fast<Alpha>(color: Color<Self, Alpha>) -> Color<Target, Alpha>
     where
         Alpha: ToAlpha<Straight>,
@@ -572,12 +580,19 @@ where
 }
 
 impl<T> ToSpace<T> for T {
+    #[inline(always)]
     fn to_space<Alpha>(color: Color<T, Alpha>) -> Color<T, Alpha> {
+        color
+    }
+
+    #[inline(always)]
+    fn to_space_fast<Alpha>(color: Color<T, Alpha>) -> Color<T, Alpha> {
         color
     }
 }
 
 impl ToSpace<Linear> for Srgb {
+    #[inline(always)]
     fn to_space<Alpha>(color: Color<Self, Alpha>) -> Color<Linear, Alpha>
     where
         Alpha: ToAlpha<Straight>,
@@ -586,6 +601,7 @@ impl ToSpace<Linear> for Srgb {
         color.to_alpha::<Straight>().to_linear().to_alpha::<Alpha>()
     }
 
+    #[inline(always)]
     fn to_space_fast<Alpha>(color: Color<Self, Alpha>) -> Color<Linear, Alpha>
     where
         Alpha: ToAlpha<Straight>,
@@ -599,6 +615,7 @@ impl ToSpace<Linear> for Srgb {
 }
 
 impl ToSpace<Srgb> for Linear {
+    #[inline(always)]
     fn to_space<Alpha>(color: Color<Self, Alpha>) -> Color<Srgb, Alpha>
     where
         Alpha: ToAlpha<Straight>,
@@ -607,6 +624,7 @@ impl ToSpace<Srgb> for Linear {
         color.to_alpha::<Straight>().to_srgb().to_alpha::<Alpha>()
     }
 
+    #[inline(always)]
     fn to_space_fast<Alpha>(color: Color<Self, Alpha>) -> Color<Srgb, Alpha>
     where
         Alpha: ToAlpha<Straight>,
