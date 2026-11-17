@@ -9,7 +9,7 @@ layer:convert("srgb")
 return {
 	render = function()
 		local target = base:clone()
-		target:blend(layer, { color_space = "srgb" })
+		target:blend(layer)
 
 		local pixel = target:pixel(0, 0)
 		assert(math.abs(pixel.r - 246) <= 1, pixel.r)

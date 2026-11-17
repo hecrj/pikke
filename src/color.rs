@@ -305,6 +305,22 @@ impl<S> Color<S, Premultiplied> {
     }
 }
 
+pub trait Discriminant {
+    fn discriminant() -> Space;
+}
+
+impl Discriminant for Linear {
+    fn discriminant() -> Space {
+        Space::Linear
+    }
+}
+
+impl Discriminant for Srgb {
+    fn discriminant() -> Space {
+        Space::Srgb
+    }
+}
+
 pub trait Luma<Alpha>: Sized {
     fn luma(color: Color<Self, Alpha>) -> f32;
 
