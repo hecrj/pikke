@@ -313,9 +313,10 @@ pub trait Luma<Alpha>: Sized {
 
 impl<Alpha> Luma<Alpha> for Srgb
 where
-    Alpha: ToAlpha<Straight>,
+    Alpha: ToAlpha<Straight> + ToAlpha<Premultiplied>,
     Straight: ToAlpha<Alpha>,
 {
+    // TODO: Luma type capturing `Space` and `Alpha`
     #[inline(always)]
     fn luma(color: Color<Self, Alpha>) -> f32 {
         Linear::luma(color.to_space())
@@ -327,7 +328,10 @@ where
     }
 }
 
-impl<Alpha> Luma<Alpha> for Linear {
+impl<Alpha> Luma<Alpha> for Linear
+where
+    Alpha: ToAlpha<Premultiplied>,
+{
     #[inline(always)]
     fn luma(color: Color<Self, Alpha>) -> f32 {
         const LUMA_R: f64 = 0.2126;
@@ -340,7 +344,7 @@ impl<Alpha> Luma<Alpha> for Linear {
     #[inline(always)]
     fn with_luma(color: Color<Self, Alpha>, luma: f32) -> Color<Self, Alpha> {
         let luma = luma.clamp(0.0, 1.0);
-        let current = Self::luma(color);
+        let current = Self::luma(color.to_alpha());
 
         if current == 0.0 {
             return Color {
