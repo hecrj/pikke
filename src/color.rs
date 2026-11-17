@@ -67,6 +67,39 @@ impl<Space, Alpha> Color<Space, Alpha> {
     {
         ToAlpha::to_alpha(self)
     }
+
+    pub fn luma(self) -> f32
+    where
+        Space: Luma<Alpha>,
+    {
+        Space::luma(self)
+    }
+
+    pub fn with_luma(self, luma: f32) -> Self
+    where
+        Space: Luma<Alpha>,
+    {
+        Space::with_luma(self, luma)
+    }
+
+    pub fn stretch(self, low: f32, high: f32) -> Self {
+        let scale = 1.0 / (high - low);
+
+        let stretch = |value: f32| {
+            if value < low || value > high {
+                value
+            } else {
+                (value - low) * scale
+            }
+        };
+
+        Self {
+            r: stretch(self.r),
+            g: stretch(self.g),
+            b: stretch(self.b),
+            ..self
+        }
+    }
 }
 
 impl<Space> Color<Space, Straight> {
@@ -79,20 +112,6 @@ impl<Space> Color<Space, Straight> {
             _space: PhantomData,
             _alpha: PhantomData,
         }
-    }
-
-    pub fn luma(self) -> f32
-    where
-        Space: Luma,
-    {
-        Space::luma(self)
-    }
-
-    pub fn with_luma(self, luma: f32) -> Self
-    where
-        Space: Luma,
-    {
-        Space::with_luma(self, luma)
     }
 }
 
@@ -177,25 +196,6 @@ impl Color {
             a: lower.a + (upper.a - lower.a) * weight,
             _space: PhantomData,
             _alpha: PhantomData,
-        }
-    }
-
-    pub fn stretch(self, low: f32, high: f32) -> Self {
-        let scale = 1.0 / (high - low);
-
-        let stretch = |value: f32| {
-            if value < low || value > high {
-                value
-            } else {
-                (value - low) * scale
-            }
-        };
-
-        Self {
-            r: stretch(self.r),
-            g: stretch(self.g),
-            b: stretch(self.b),
-            ..self
         }
     }
 
@@ -305,27 +305,31 @@ impl<S> Color<S, Premultiplied> {
     }
 }
 
-pub trait Luma: Sized {
-    fn luma(color: Color<Self, Straight>) -> f32;
+pub trait Luma<Alpha>: Sized {
+    fn luma(color: Color<Self, Alpha>) -> f32;
 
-    fn with_luma(color: Color<Self, Straight>, luma: f32) -> Color<Self, Straight>;
+    fn with_luma(color: Color<Self, Alpha>, luma: f32) -> Color<Self, Alpha>;
 }
 
-impl Luma for Srgb {
+impl<Alpha> Luma<Alpha> for Srgb
+where
+    Alpha: ToAlpha<Straight>,
+    Straight: ToAlpha<Alpha>,
+{
     #[inline(always)]
-    fn luma(color: Color<Self, Straight>) -> f32 {
+    fn luma(color: Color<Self, Alpha>) -> f32 {
         Linear::luma(color.to_space())
     }
 
     #[inline(always)]
-    fn with_luma(color: Color<Self, Straight>, luma: f32) -> Color<Self, Straight> {
+    fn with_luma(color: Color<Self, Alpha>, luma: f32) -> Color<Self, Alpha> {
         Linear::with_luma(color.to_space(), luma).to_space()
     }
 }
 
-impl Luma for Linear {
+impl<Alpha> Luma<Alpha> for Linear {
     #[inline(always)]
-    fn luma(color: Color<Self, Straight>) -> f32 {
+    fn luma(color: Color<Self, Alpha>) -> f32 {
         const LUMA_R: f64 = 0.2126;
         const LUMA_G: f64 = 0.7152;
         const LUMA_B: f64 = 0.0722;
@@ -334,7 +338,7 @@ impl Luma for Linear {
     }
 
     #[inline(always)]
-    fn with_luma(color: Color<Self, Straight>, luma: f32) -> Color<Self, Straight> {
+    fn with_luma(color: Color<Self, Alpha>, luma: f32) -> Color<Self, Alpha> {
         let luma = luma.clamp(0.0, 1.0);
         let current = Self::luma(color);
 
@@ -725,12 +729,12 @@ impl<Space: 'static> Buffer<Space> {
 
     pub fn luma(&self) -> (f32, f32)
     where
-        Space: Luma,
+        Space: Luma<Premultiplied>,
     {
         let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
 
         for color in self.iter() {
-            let luma = color.demultiply().luma();
+            let luma = color.luma();
             lo = lo.min(luma);
             hi = hi.max(luma);
         }

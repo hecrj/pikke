@@ -129,7 +129,7 @@ impl<Space: 'static> Image<Space> {
 
     pub fn autocontrast(&mut self)
     where
-        Space: color::Luma + color::ToSpace<color::Linear>,
+        Space: color::Luma<color::Premultiplied> + color::ToSpace<color::Linear>,
         color::Linear: color::ToSpace<Space>,
     {
         let (lo, hi) = self.buffer.luma();
@@ -140,14 +140,7 @@ impl<Space: 'static> Image<Space> {
 
         let buffer = Arc::make_mut(&mut self.buffer);
 
-        buffer.apply(|color| {
-            color
-                .demultiply()
-                .to_space_fast()
-                .stretch(lo, hi)
-                .to_space_fast()
-                .premultiply()
-        });
+        buffer.apply(|color| color.stretch(lo, hi));
     }
 
     pub fn invert(&mut self) {
@@ -619,7 +612,7 @@ impl<Space: 'static> Image<Space> {
 
     pub fn luma_in(&self, region: Rectangle) -> Result<f32>
     where
-        Space: color::Luma,
+        Space: color::Luma<color::Premultiplied>,
     {
         let scale = self.viewport.scale();
         let left = scale.to_physical_signed(region.x)?;
@@ -644,7 +637,7 @@ impl<Space: 'static> Image<Space> {
             let row = self.buffer.row(row, width).crop(left, right);
 
             for color in row.iter() {
-                luma += color.demultiply().luma();
+                luma += color.luma();
             }
         }
 
@@ -851,7 +844,7 @@ impl<Space: 'static> Reference<Space> {
 
     fn autocontrast(&mut self)
     where
-        Space: color::Luma + color::ToSpace<color::Linear>,
+        Space: color::Luma<color::Premultiplied> + color::ToSpace<color::Linear>,
         color::Linear: color::ToSpace<Space>,
     {
         self.replace(|source| {
@@ -924,7 +917,7 @@ impl<Space: 'static> Reference<Space> {
 
     fn luma_in(&self, region: Rectangle) -> Result<f32>
     where
-        Space: color::Luma,
+        Space: color::Luma<color::Premultiplied>,
     {
         self.evaluate(|image| image.luma_in(region))
     }
@@ -1068,7 +1061,9 @@ impl OutlinePen for PathPen {
 
 impl<Space: 'static> UserData for Reference<Space>
 where
-    Space: color::Luma + color::ToSpace<color::Linear> + color::ToSpace<color::Srgb>,
+    Space: color::Luma<color::Premultiplied>
+        + color::ToSpace<color::Linear>
+        + color::ToSpace<color::Srgb>,
     color::Linear: color::ToSpace<Space>,
     color::Srgb: color::ToSpace<Space>,
 {
