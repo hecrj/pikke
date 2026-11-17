@@ -45,3 +45,9 @@ you are allowed to commit or push until explicitly asked to.
 ## Hygiene
 
 `cargo fmt --check` and `cargo lint` must be clean.
+
+## Benchmarks
+
+Run `cargo bench --bench lua -- --baseline golden --quick` for a quick benchmark
+against the golden measurements. Only needed when working on `image` or `color`
+hot paths.

@@ -1,1 +1,8 @@
-/target
+target/*
+!target/criterion/
+target/criterion/*
+!target/criterion/lua/
+target/criterion/lua/*
+!target/criterion/lua/*/
+target/criterion/lua/*/*
+!target/criterion/lua/*/golden/
