@@ -4,7 +4,14 @@ use std::path::{Path, PathBuf};
 use mlua::{Lua, Result, Value};
 
 use crate::color;
-use crate::{Color, Gradient, Paint, Point};
+use crate::{Color, Gradient, Paint, Point, Rectangle};
+
+pub fn as_rectangle(value: &Value) -> Option<Rectangle> {
+    value
+        .as_userdata()
+        .and_then(|data| data.borrow::<Rectangle>().ok())
+        .map(|rectangle| *rectangle)
+}
 
 pub fn point(operation: &str, value: &Value) -> Result<Point> {
     if let Some(point) = value

@@ -774,6 +774,120 @@ impl<Space: 'static> Image<Space> {
         Ok(covered)
     }
 
+    pub fn detect(&self, color: Color) -> impl Iterator<Item = Rectangle> + 'static
+    where
+        Space: 'static,
+        color::Linear: color::ToSpace<Space>,
+    {
+        struct Regions<Space> {
+            buffer: Arc<color::Buffer<Space>>,
+            width: usize,
+            height: usize,
+            scale: Scale,
+            target: Color<Space, color::Premultiplied>,
+            claimed: Vec<u8>,
+            cursor: usize,
+            stack: Vec<usize>,
+        }
+
+        fn claimed(bits: &[u8], index: usize) -> bool {
+            (bits[index >> 3] & (1 << (index & 7))) != 0
+        }
+
+        fn claim(bits: &mut [u8], index: usize) {
+            bits[index >> 3] |= 1 << (index & 7);
+        }
+
+        impl<Space: 'static> Iterator for Regions<Space> {
+            type Item = Rectangle;
+
+            fn next(&mut self) -> Option<Rectangle> {
+                let total = self.width * self.height;
+                let mut seed = None;
+
+                for index in self.cursor..total {
+                    if !claimed(&self.claimed, index) && self.buffer.at(index) == self.target {
+                        seed = Some(index);
+                        break;
+                    }
+                }
+
+                let Some(seed) = seed else {
+                    self.cursor = total;
+                    return None;
+                };
+
+                self.cursor = seed + 1;
+
+                let (sx, sy) = (seed % self.width, seed / self.width);
+                let (mut min_x, mut min_y, mut max_x, mut max_y) = (sx, sy, sx, sy);
+
+                claim(&mut self.claimed, seed);
+                self.stack.clear();
+                self.stack.push(seed);
+
+                while let Some(index) = self.stack.pop() {
+                    let (x, y) = (index % self.width, index / self.width);
+                    min_x = min_x.min(x);
+                    min_y = min_y.min(y);
+                    max_x = max_x.max(x);
+                    max_y = max_y.max(y);
+
+                    let mut frontier = [0usize; 4];
+                    let mut count = 0;
+
+                    if y > 0 {
+                        frontier[count] = index - self.width;
+                        count += 1;
+                    }
+                    if y + 1 < self.height {
+                        frontier[count] = index + self.width;
+                        count += 1;
+                    }
+                    if x > 0 {
+                        frontier[count] = index - 1;
+                        count += 1;
+                    }
+                    if x + 1 < self.width {
+                        frontier[count] = index + 1;
+                        count += 1;
+                    }
+
+                    for &neighbor in &frontier[..count] {
+                        if !claimed(&self.claimed, neighbor)
+                            && self.buffer.at(neighbor) == self.target
+                        {
+                            claim(&mut self.claimed, neighbor);
+                            self.stack.push(neighbor);
+                        }
+                    }
+                }
+
+                Some(Rectangle::new(
+                    min_x as f32 / self.scale,
+                    min_y as f32 / self.scale,
+                    (max_x - min_x + 1) as f32 / self.scale,
+                    (max_y - min_y + 1) as f32 / self.scale,
+                ))
+            }
+        }
+
+        let target = color.to_space::<Space>().premultiply();
+        let width = self.width() as usize;
+        let height = self.height() as usize;
+
+        Regions {
+            buffer: self.buffer.clone(),
+            width,
+            height,
+            scale: self.viewport.scale(),
+            target,
+            claimed: vec![0u8; (width * height).div_ceil(8)],
+            cursor: 0,
+            stack: Vec::new(),
+        }
+    }
+
     pub fn write(&self, output: &path::Path) -> Result<()>
     where
         Space: color::ToSpace<color::Srgb>,
@@ -1197,6 +1311,15 @@ impl Value {
         }
     }
 
+    pub fn detect(&self, color: Color) -> impl Iterator<Item = Rectangle> + use<> {
+        match self {
+            Value::Linear(image) => {
+                Box::new(image.detect(color)) as Box<dyn Iterator<Item = _> + 'static>
+            }
+            Value::Srgb(image) => Box::new(image.detect(color)),
+        }
+    }
+
     pub fn to_rgba8(&self) -> color::Rgba<'static> {
         match self {
             Value::Linear(image) => image.to_rgba8(),
@@ -1388,6 +1511,18 @@ impl UserData for Reference {
             "pixel",
             |_lua, this, (x, y): (f32, f32)| -> mlua::Result<Option<color::Pixel>> {
                 Ok(this.pixel(x, y)?)
+            },
+        );
+
+        methods.add_method(
+            "detect",
+            |lua, this, color: mlua::Value| -> mlua::Result<mlua::Function> {
+                let color = lua::color("detect", &color)?;
+                let mut regions = this.evaluate(move |image| Ok(image.detect(color)))?;
+
+                lua.create_function_mut(move |_lua, (): ()| -> mlua::Result<Option<Rectangle>> {
+                    Ok(regions.next())
+                })
             },
         );
     }

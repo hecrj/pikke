@@ -103,6 +103,7 @@ change is a script edit; an op-behavior change is an engine edit.
 | `dominant_in` | `img:dominant_in(region) → Color` | The dominant color of `region` (a `Rectangle`): the demultiplied linear channels, clamped to 0–1, quantized to 4 bits, the most-populated bucket weighted by alpha, returned as that bucket's alpha-weighted mean. An empty or fully transparent region is transparent. |
 | `coverage_in` | `img:coverage_in(region) → number` | The count of non-transparent pixels of `region` (a `Rectangle`): the physical pixels whose alpha is nonzero, the region clipped to the image. |
 | `pixel` | `img:pixel(x, y) → Pixel` | The pixel at `(x, y)` (logical px) as a `Pixel` (sRGB, 0–255, § Pixel); nil outside the image. |
+| `detect` | `img:detect(color) → iterator` | A lazy iterator over the 4-connected components of `color` (a `Color`, an `Oklch`, or a hex string): an exact match on the stored premultiplied channels, yielding each component's bounding `Rectangle` (logical px) in scan order. The generic-`for` loop drives it — no match yields `nil` immediately. |
 | `width` | `img.width → number` | The image's width in logical px. |
 | `height` | `img.height → number` | The image's height in logical px. |
 | `physical_width` | `img.physical_width → number` | The image's width in physical px (the run scale). |
@@ -124,6 +125,10 @@ change is a script edit; an op-behavior change is an engine edit.
 | `move_to` | `path:move_to({x, y})` | Start a subpath at a logical point (`x`/`y` default 0). In place. |
 | `line_to` | `path:line_to({x, y})` | Extend the current subpath with a straight line to a logical point (`x`/`y` default 0). In place. |
 | `close` | `path:close()` | Close the current subpath. In place. |
+
+`Rectangle`s compare by value with `==` (`x`/`y`/`width`/`height`), so a
+`Rectangle` returned by an op — `text.bounds`, `detect` — equals the
+`rectangle(…)` that pins it.
 
 ### Gradient and Point
 

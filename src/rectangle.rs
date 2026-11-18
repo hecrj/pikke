@@ -1,6 +1,8 @@
 use mlua::{Lua, Result, Table, UserData, UserDataFields, UserDataMethods, Value};
 
-#[derive(Clone, Copy, Debug, Default)]
+use crate::lua;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Rectangle {
     pub x: f32,
     pub y: f32,
@@ -56,6 +58,13 @@ impl UserData for Rectangle {
     }
 
     fn add_methods<M: UserDataMethods<Rectangle>>(methods: &mut M) {
+        methods.add_meta_function("__eq", |_lua, (lhs, rhs): (Value, Value)| -> Result<bool> {
+            match (lua::as_rectangle(&lhs), lua::as_rectangle(&rhs)) {
+                (Some(lhs), Some(rhs)) => Ok(lhs == rhs),
+                _ => Ok(false),
+            }
+        });
+
         methods.add_method("padded", |_lua, this, value: Value| -> Result<Rectangle> {
             let padding = match value {
                 Value::Number(n) => Padding::uniform(n as f32),

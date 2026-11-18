@@ -11,7 +11,7 @@ use rayon::slice::{ParallelSlice, ParallelSliceMut};
 
 use crate::lua;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub struct Color<Space = Linear, Alpha = Straight> {
     pub r: f32,
     pub g: f32,
@@ -19,6 +19,12 @@ pub struct Color<Space = Linear, Alpha = Straight> {
     pub a: f32,
     _space: PhantomData<Space>,
     _alpha: PhantomData<Alpha>,
+}
+
+impl<Space, Alpha> PartialEq for Color<Space, Alpha> {
+    fn eq(&self, other: &Self) -> bool {
+        self.r == other.r && self.g == other.g && self.b == other.b && self.a == other.a
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
