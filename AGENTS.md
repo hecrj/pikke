@@ -31,6 +31,12 @@ no content knowledge.
   `crate` (last). Shared types are importable from the crate root
   (`pub use`).
 
+## Tests
+
+Avoid unit tests if possible. The Lua tests (`tests/lua/`) drive
+the real op API end-to-end and are the coverage of record for op
+behavior.
+
 ## Comments
 
 No comments allowed, unless explicitly requested during review.
