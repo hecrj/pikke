@@ -948,10 +948,10 @@ impl Reference {
     }
 
     fn replace(&mut self, compute: impl Fn(&mut Value) -> Result<()> + 'static) {
-        let copy = self.clone();
-
         self.0 = Rc::new(Mutex::new(Thunk::Computation(
             if Rc::strong_count(&self.0) == 1 {
+                let copy = self.clone();
+
                 Rc::new(move || {
                     copy.evaluate(|image| {
                         compute(image)?;
@@ -959,6 +959,8 @@ impl Reference {
                     })
                 })
             } else {
+                let copy = self.clone();
+
                 Rc::new(move || {
                     Self(Rc::new(Mutex::new(Thunk::Snapshot(copy.clone())))).evaluate(|image| {
                         compute(image)?;
