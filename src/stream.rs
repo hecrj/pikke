@@ -16,6 +16,7 @@ pub struct Stream {
     program: String,
     child: Child,
     viewport: Viewport,
+    space: color::Space,
     alpha: color::Alpha,
     tail: Option<mpsc::Receiver<Vec<u8>>>,
     drain: Option<JoinHandle<()>>,
@@ -29,6 +30,7 @@ impl Stream {
         width: f32,
         height: f32,
         scale: Scale,
+        space: color::Space,
         alpha: color::Alpha,
     ) -> Result<Stream> {
         let viewport = Viewport::from_logical(width, height, scale)?;
@@ -58,6 +60,7 @@ impl Stream {
             program,
             child,
             viewport,
+            space,
             alpha,
             tail: Some(tail),
             drain: Some(drain),
@@ -65,7 +68,7 @@ impl Stream {
         })
     }
 
-    pub fn frame(&mut self) -> Result<Option<Image<color::Linear>>> {
+    pub fn frame(&mut self) -> Result<Option<image::Value>> {
         if self.drain.is_none() {
             return Err(io::Error::other(format!("stream: {} has ended", self.program)).into());
         }
@@ -97,19 +100,35 @@ impl Stream {
                     return Err(self.report(message).into());
                 }
                 Ok(count) if read + count == self.buffer.len() => {
-                    return Ok(Some(Image::from_buffer(
-                        self.viewport,
-                        match self.alpha {
+                    fn from_rgba<Space: 'static>(
+                        alpha: color::Alpha,
+                        buffer: &[u8],
+                    ) -> color::Buffer<Space>
+                    where
+                        color::Srgb: color::ToSpace<Space>,
+                    {
+                        match alpha {
                             color::Alpha::Straight => {
-                                color::Buffer::from_rgba::<color::Straight>(self.buffer.as_slice())
+                                color::Buffer::from_rgba::<color::Straight>(buffer)
                             }
                             color::Alpha::Premultiplied => {
-                                color::Buffer::from_rgba::<color::Premultiplied>(
-                                    self.buffer.as_slice(),
-                                )
+                                color::Buffer::from_rgba::<color::Premultiplied>(buffer)
                             }
-                        },
-                    )?));
+                        }
+                    }
+
+                    return Ok(Some(match self.space {
+                        color::Space::Linear => Image::from_buffer(
+                            self.viewport,
+                            from_rgba(self.alpha, self.buffer.as_slice()),
+                        )
+                        .map(image::Value::Linear),
+                        color::Space::Srgb => Image::from_buffer(
+                            self.viewport,
+                            from_rgba(self.alpha, self.buffer.as_slice()),
+                        )
+                        .map(image::Value::Srgb),
+                    }?));
                 }
                 Ok(count) => read += count,
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
@@ -155,8 +174,7 @@ impl UserData for Stream {
             |lua, this, (): ()| -> mlua::Result<Value> {
                 match this.frame()? {
                     Some(frame) => {
-                        let frame = lua
-                            .create_userdata(image::Reference::new(image::Value::Linear(frame)))?;
+                        let frame = lua.create_userdata(image::Reference::new(frame))?;
                         Ok(frame.to_value())
                     }
                     None => Ok(Value::Nil),
@@ -213,6 +231,13 @@ pub fn install(lua: &Lua, env: &Table, scale: Scale) -> Result<()> {
                     ));
                 }
 
+                let color_space = opts
+                    .get::<Option<String>>("color_space")?
+                    .as_deref()
+                    .map_or(Ok(color::Space::Linear), |value| {
+                        lua::color_space("stream", value)
+                    })?;
+
                 let alpha: Option<String> = opts.get("alpha")?;
 
                 let alpha = match alpha.as_deref() {
@@ -228,7 +253,7 @@ pub fn install(lua: &Lua, env: &Table, scale: Scale) -> Result<()> {
 
                 let argv = argv(opts)?;
 
-                Stream::spawn(program, argv, width, height, scale, alpha)
+                Stream::spawn(program, argv, width, height, scale, color_space, alpha)
                     .map_err(|error| mlua::Error::RuntimeError(error.to_string()))
             },
         )?,
