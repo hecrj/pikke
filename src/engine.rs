@@ -162,6 +162,9 @@ impl Engine {
             eprintln!("output: {} ({frames} frames)", video.display());
         }
 
+        self.lua.gc_collect()?;
+        self.lua.gc_collect()?;
+
         Ok(())
     }
 }
