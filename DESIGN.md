@@ -96,8 +96,10 @@ change is a script edit; an op-behavior change is an engine edit.
 | `autocontrast` | `img:autocontrast()` | Histogram-stretch to full range, **tone-preserving** (no highlight/shadow clip). In place. |
 | `invert` | `img:invert()` | Invert every pixel's color: the unpremultiplied channels become `1 − c`, the alpha is unchanged. In place. |
 | `monochrome` | `img:monochrome(color)` | Replace every pixel's color with the shade of `color` (a `Color`, an `Oklch`, or a hex string) carrying the pixel's luma (see *Luma*): each pixel's alpha is unchanged, so the image's luma (`luma_in`) is invariant; a target the hue can't carry falls short (as with `with_luma`), the encode clamps to the gamut. In place. |
+| `recolor` | `img:recolor(color)` | Replace every pixel with the **flat** `color` (a `Color`, an `Oklch`, or a hex string), keeping only the pixel's alpha: the source's color and luma are discarded, and the result's alpha is the source's alpha scaled by `color`'s alpha (its opacity). Unlike `monochrome`, the luma is not preserved. In place. |
 | `resize` | `img:resize({width, height, mode, filter, align_x, align_y})` | Scale to the target (logical px): exactly one of `width`/`height` — aspect preserved; both — the target box, `mode = "cover"` covers it and crops to it — the crop window anchored by `align_x` (`"left"` / `"center"` (default) / `"right"`) and `align_y` (`"top"` / `"center"` (default) / `"bottom"`) — no `mode` scales to it exactly; `filter = "lanczos"` or `"cubic"` (default). In place. |
 | `blend` | `img:blend(other, {at, color_space})` | Alpha-composite `other` over `img`, `other`'s top-left at `at` (a `Rectangle`); the blend is clipped to `at` and to the receiver. Omitting `at` blends the whole layer at `(0, 0)`; a zero `at` width or height blends nothing. `color_space`: `"linear"` (default) / `"srgb"`. In place. |
+| `blur` | `img:blur(radius)` | A separable Gaussian blur (a free op) over the premultiplied channels, `radius` in logical px (`≥ 0`; `0` is a no-op). Out-of-bounds samples are transparent, so a blurred region fades to clear at the image's edge. In place. |
 | `fill` | `img:fill(region, paint)` | Paint `region` (a `Rectangle`, `Text`, or `Path`) with `paint` (a `Color`, an `Oklch`, a hex string, or a `Gradient`). The space is chosen by the region's kind: a `Text` region composites in sRGB, a `Rectangle` or `Path` region in linear. In place. |
 | `luma_in` | `img:luma_in(region) → number` | Mean luma of `region` (a `Rectangle`), 0–255 (see *Luma*). |
 | `dominant_in` | `img:dominant_in(region) → Color` | The dominant color of `region` (a `Rectangle`): the demultiplied linear channels, clamped to 0–1, quantized to 4 bits, the most-populated bucket weighted by alpha, returned as that bucket's alpha-weighted mean. An empty or fully transparent region is transparent. |
@@ -271,8 +273,8 @@ conforming engine, because some ops are deliberately free.
 - **Deterministic.** The same inputs, parameters and run scale yield
   the same frame pixels, every run.
 - **The free ops may differ.** The resampling/resize (any scaling),
-  the font rasterization (hinting/antialiasing), and the encoders
-  (PNG, MP4) are free: a conforming engine may use any
+  the blur (its kernel), the font rasterization (hinting/antialiasing),
+  and the encoders (PNG, MP4) are free: a conforming engine may use any
   implementation — that is where two implementations legitimately
   differ.
 

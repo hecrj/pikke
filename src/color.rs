@@ -809,6 +809,85 @@ impl<Space: 'static> Buffer<Space> {
         }
     }
 
+    pub fn blur(&mut self, width: usize, radius: usize) {
+        fn gaussian_taps(radius: usize) -> Vec<f32> {
+            if radius == 0 {
+                return vec![1.0];
+            }
+
+            let sigma = radius as f32 / 2.0;
+            let lower = -(radius as isize);
+            let weights: Vec<f32> = (lower..=radius as isize)
+                .map(|distance| {
+                    let value = distance as f32;
+                    (-value * value / (2.0 * sigma * sigma)).exp()
+                })
+                .collect();
+            let sum = weights.iter().sum::<f32>();
+
+            weights.iter().map(|weight| weight / sum).collect()
+        }
+
+        fn blur_channel(channel: &mut [f32], width: usize, height: usize, taps: &[f32]) {
+            let center = taps.len() / 2;
+            let mut scratch = vec![0.0f32; width];
+
+            for row in 0..height {
+                let start = row * width;
+
+                for (column, slot) in scratch.iter_mut().enumerate() {
+                    let mut sum = 0.0;
+
+                    for (tap_index, tap) in taps.iter().enumerate() {
+                        let source = column as isize + (tap_index as isize - center as isize);
+
+                        if (0..width as isize).contains(&source) {
+                            sum += channel[start + source as usize] * tap;
+                        }
+                    }
+
+                    *slot = sum;
+                }
+
+                channel[start..start + width].copy_from_slice(&scratch);
+            }
+
+            scratch.resize(height, 0.0);
+
+            for column in 0..width {
+                for (row, slot) in scratch.iter_mut().enumerate() {
+                    let mut sum = 0.0;
+
+                    for (tap_index, tap) in taps.iter().enumerate() {
+                        let source = row as isize + (tap_index as isize - center as isize);
+
+                        if (0..height as isize).contains(&source) {
+                            sum += channel[source as usize * width + column] * tap;
+                        }
+                    }
+
+                    *slot = sum;
+                }
+
+                for row in 0..height {
+                    channel[row * width + column] = scratch[row];
+                }
+            }
+        }
+
+        let height = self.len() / width;
+
+        if radius == 0 || width == 0 || height == 0 {
+            return;
+        }
+
+        let taps = gaussian_taps(radius);
+        blur_channel(&mut self.r, width, height, &taps);
+        blur_channel(&mut self.g, width, height, &taps);
+        blur_channel(&mut self.b, width, height, &taps);
+        blur_channel(&mut self.a, width, height, &taps);
+    }
+
     pub fn put(&mut self, i: usize, color: Color<Space, Premultiplied>) {
         self.r[i] = color.r;
         self.g[i] = color.g;

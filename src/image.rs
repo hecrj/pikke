@@ -190,6 +190,30 @@ impl<Space: 'static> Image<Space> {
         });
     }
 
+    pub fn blur(&mut self, radius: f32) -> Result<()> {
+        if radius <= 0.0 || !radius.is_finite() {
+            return Ok(());
+        }
+
+        let scale = self.viewport.scale();
+        let radius = scale.to_physical(radius)?;
+        let width = self.width() as usize;
+        let buffer = Arc::make_mut(&mut self.buffer);
+
+        buffer.blur(width, radius as usize);
+        Ok(())
+    }
+
+    pub fn recolor(&mut self, color: Color)
+    where
+        color::Linear: color::ToSpace<Space>,
+    {
+        let buffer = Arc::make_mut(&mut self.buffer);
+        let color = color.to_space().premultiply();
+
+        buffer.apply(|mut pixel| pixel.put(color.scale(pixel.color().a)));
+    }
+
     pub fn resize(
         &mut self,
         dimension: Dimension,
@@ -1034,6 +1058,17 @@ impl Reference {
         });
     }
 
+    fn blur(&mut self, radius: f32) {
+        self.replace(move |source| source.blur(radius));
+    }
+
+    fn recolor(&mut self, color: Color) {
+        self.replace(move |source| {
+            source.recolor(color);
+            Ok(())
+        });
+    }
+
     fn blend(&mut self, other: &Self, at: Option<Rectangle>, space: Option<color::Space>) {
         let other = other.clone();
 
@@ -1292,6 +1327,24 @@ impl Value {
         }
     }
 
+    pub fn blur(&mut self, radius: f32) -> Result<()> {
+        match self {
+            Value::Linear(image) => image.blur(radius),
+            Value::Srgb(image) => image.blur(radius),
+        }
+    }
+
+    pub fn recolor(&mut self, color: Color) {
+        match self {
+            Value::Linear(image) => {
+                image.recolor(color);
+            }
+            Value::Srgb(image) => {
+                image.recolor(color);
+            }
+        }
+    }
+
     fn blend(
         &mut self,
         other: &Self,
@@ -1494,6 +1547,24 @@ impl UserData for Reference {
             |_lua, this, color: mlua::Value| -> mlua::Result<()> {
                 let color = lua::color("monochrome", &color)?;
                 this.monochrome(color);
+                Ok(())
+            },
+        );
+        methods.add_method_mut("blur", |_lua, this, radius: f32| -> mlua::Result<()> {
+            if !radius.is_finite() || radius < 0.0 {
+                return Err(mlua::Error::RuntimeError(
+                    "blur: 'radius' must be a non-negative number".to_owned(),
+                ));
+            }
+
+            this.blur(radius);
+            Ok(())
+        });
+        methods.add_method_mut(
+            "recolor",
+            |_lua, this, color: mlua::Value| -> mlua::Result<()> {
+                let color = lua::color("recolor", &color)?;
+                this.recolor(color);
                 Ok(())
             },
         );
