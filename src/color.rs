@@ -1296,6 +1296,7 @@ pub enum Filter {
     #[default]
     Cubic,
     Lanczos,
+    Nearest,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1323,6 +1324,7 @@ pub fn resize(
     match filter {
         Filter::Lanczos => resample(lanczos3, 3.0, src, src_w, src_h, dst_w, dst_h),
         Filter::Cubic => resample_cubic(src, src_w, src_h, dst_w, dst_h),
+        Filter::Nearest => resample_nearest(src, src_w, src_h, dst_w, dst_h),
     }
 }
 
@@ -1562,6 +1564,47 @@ fn resample_cubic_row(out_row: &mut [f32], src: &[f32], src_w: usize, y: usize, 
     for o in out_row.iter_mut() {
         *o /= divisor;
     }
+}
+
+fn resample_nearest(src: &[f32], src_w: u16, src_h: u16, dst_w: u16, dst_h: u16) -> Vec<f32> {
+    fn indices(src_len: usize, dst_len: usize) -> Vec<usize> {
+        let scale = src_len as f64 / dst_len as f64;
+
+        (0..dst_len)
+            .map(|index| ((index as f64 + 0.5) * scale).min(src_len as f64 - 1.0) as usize)
+            .collect()
+    }
+
+    let (sw, sh, dw, dh) = (
+        src_w as usize,
+        src_h as usize,
+        dst_w as usize,
+        dst_h as usize,
+    );
+
+    if dw == 0 {
+        return Vec::new();
+    }
+
+    let columns = indices(sw, dw);
+    let rows = indices(sh, dh);
+    let mut out = vec![0.0f32; dw * dh];
+
+    #[cfg(feature = "multithreading")]
+    let iter = out.par_chunks_mut(dw);
+
+    #[cfg(not(feature = "multithreading"))]
+    let iter = out.chunks_mut(dw);
+
+    iter.enumerate().for_each(|(y, out_row)| {
+        let row = &src[rows[y] * sw..(rows[y] + 1) * sw];
+
+        for (out, &column) in out_row.iter_mut().zip(&columns) {
+            *out = row[column];
+        }
+    });
+
+    out
 }
 
 fn lanczos3(x: f64) -> f64 {

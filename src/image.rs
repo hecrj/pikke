@@ -1491,6 +1491,7 @@ impl UserData for Reference {
                 None => color::Filter::default(),
                 Some("cubic") => color::Filter::Cubic,
                 Some("lanczos") => color::Filter::Lanczos,
+                Some("nearest") => color::Filter::Nearest,
                 Some(other) => {
                     return Err(mlua::Error::RuntimeError(format!(
                         "resize: unknown filter: {other}"
