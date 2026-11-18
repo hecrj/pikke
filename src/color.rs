@@ -106,6 +106,14 @@ impl<Space, Alpha> Color<Space, Alpha> {
             ..self
         }
     }
+
+    pub fn distance(self, other: Self) -> f32 {
+        (self.r - other.r)
+            .abs()
+            .max((self.g - other.g).abs())
+            .max((self.b - other.b).abs())
+            .max((self.a - other.a).abs())
+    }
 }
 
 impl<Space> Color<Space, Straight> {

@@ -837,7 +837,7 @@ impl<Space: 'static> Image<Space> {
         Ok(covered)
     }
 
-    pub fn detect(&self, color: Color) -> impl Iterator<Item = Rectangle> + 'static
+    pub fn detect(&self, color: Color, tolerance: f32) -> impl Iterator<Item = Rectangle> + 'static
     where
         Space: 'static,
         color::Linear: color::ToSpace<Space>,
@@ -848,6 +848,7 @@ impl<Space: 'static> Image<Space> {
             height: usize,
             scale: Scale,
             target: Color<Space, color::Premultiplied>,
+            tolerance: f32,
             claimed: Vec<u8>,
             cursor: usize,
             stack: Vec<usize>,
@@ -869,7 +870,9 @@ impl<Space: 'static> Image<Space> {
                 let mut seed = None;
 
                 for index in self.cursor..total {
-                    if !claimed(&self.claimed, index) && self.buffer.at(index) == self.target {
+                    if !claimed(&self.claimed, index)
+                        && self.buffer.at(index).distance(self.target) <= self.tolerance
+                    {
                         seed = Some(index);
                         break;
                     }
@@ -918,7 +921,7 @@ impl<Space: 'static> Image<Space> {
 
                     for &neighbor in &frontier[..count] {
                         if !claimed(&self.claimed, neighbor)
-                            && self.buffer.at(neighbor) == self.target
+                            && self.buffer.at(neighbor).distance(self.target) <= self.tolerance
                         {
                             claim(&mut self.claimed, neighbor);
                             self.stack.push(neighbor);
@@ -945,6 +948,7 @@ impl<Space: 'static> Image<Space> {
             height,
             scale: self.viewport.scale(),
             target,
+            tolerance,
             claimed: vec![0u8; (width * height).div_ceil(8)],
             cursor: 0,
             stack: Vec::new(),
@@ -1412,12 +1416,12 @@ impl Value {
         }
     }
 
-    pub fn detect(&self, color: Color) -> impl Iterator<Item = Rectangle> + use<> {
+    pub fn detect(&self, color: Color, tolerance: f32) -> impl Iterator<Item = Rectangle> + use<> {
         match self {
             Value::Linear(image) => {
-                Box::new(image.detect(color)) as Box<dyn Iterator<Item = _> + 'static>
+                Box::new(image.detect(color, tolerance)) as Box<dyn Iterator<Item = _> + 'static>
             }
-            Value::Srgb(image) => Box::new(image.detect(color)),
+            Value::Srgb(image) => Box::new(image.detect(color, tolerance)),
         }
     }
 
@@ -1661,9 +1665,26 @@ impl UserData for Reference {
 
         methods.add_method(
             "detect",
-            |lua, this, color: mlua::Value| -> mlua::Result<mlua::Function> {
+            |lua,
+             this,
+             (color, opts): (mlua::Value, Option<Table>)|
+             -> mlua::Result<mlua::Function> {
                 let color = lua::color("detect", &color)?;
-                let mut regions = this.evaluate(move |image| Ok(image.detect(color)))?;
+                let opts = match opts {
+                    Some(opts) => opts,
+                    None => lua.create_table()?,
+                };
+
+                let tolerance: Option<mlua::Value> = opts.get("tolerance")?;
+                let tolerance = lua::number("detect", "tolerance", tolerance)?;
+
+                if tolerance < 0.0 {
+                    return Err(mlua::Error::RuntimeError(
+                        "detect: 'tolerance' must be a non-negative number".to_owned(),
+                    ));
+                }
+
+                let mut regions = this.evaluate(move |image| Ok(image.detect(color, tolerance)))?;
 
                 lua.create_function_mut(move |_lua, (): ()| -> mlua::Result<Option<Rectangle>> {
                     Ok(regions.next())
