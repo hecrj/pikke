@@ -268,7 +268,7 @@ impl<Space: 'static> Image<Space> {
     pub fn blend<Layer>(
         &mut self,
         other: &Image<Layer>,
-        at: Rectangle,
+        at: Option<Rectangle>,
         space: Option<color::Space>,
     ) -> Result<()>
     where
@@ -302,12 +302,23 @@ impl<Space: 'static> Image<Space> {
             other.clone()
         };
 
-        let at_x = scale.to_physical_signed(at.x)?;
-        let at_y = scale.to_physical_signed(at.y)?;
+        let (at_x, at_y, window_width, window_height) = match at {
+            Some(at) => (
+                scale.to_physical_signed(at.x)?,
+                scale.to_physical_signed(at.y)?,
+                scale
+                    .to_physical_signed(at.width)?
+                    .min(other.width() as i32),
+                scale
+                    .to_physical_signed(at.height)?
+                    .min(other.height() as i32),
+            ),
+            None => (0, 0, other.width() as i32, other.height() as i32),
+        };
         let left = at_x.max(0);
         let top = at_y.max(0);
-        let right = (at_x + other.width() as i32).min(self.width() as i32);
-        let bottom = (at_y + other.height() as i32).min(self.height() as i32);
+        let right = (at_x + window_width).min(self.width() as i32);
+        let bottom = (at_y + window_height).min(self.height() as i32);
 
         if left >= right || top >= bottom {
             return Ok(());
@@ -1023,7 +1034,7 @@ impl Reference {
         });
     }
 
-    fn blend(&mut self, other: &Self, at: Rectangle, space: Option<color::Space>) {
+    fn blend(&mut self, other: &Self, at: Option<Rectangle>, space: Option<color::Space>) {
         let other = other.clone();
 
         self.replace(move |source| other.evaluate(move |other| source.blend(other, at, space)));
@@ -1281,7 +1292,12 @@ impl Value {
         }
     }
 
-    fn blend(&mut self, other: &Self, at: Rectangle, space: Option<color::Space>) -> Result<()> {
+    fn blend(
+        &mut self,
+        other: &Self,
+        at: Option<Rectangle>,
+        space: Option<color::Space>,
+    ) -> Result<()> {
         match (self, other) {
             (Value::Linear(a), Value::Linear(b)) => a.blend(b, at, space),
             (Value::Linear(a), Value::Srgb(b)) => a.blend(b, at, space),
@@ -1491,8 +1507,8 @@ impl UserData for Reference {
 
                 let at: Option<AnyUserData> = opts.get("at")?;
                 let at = match at {
-                    Some(at) => *at.borrow::<Rectangle>()?,
-                    None => Rectangle::default(),
+                    Some(at) => Some(*at.borrow::<Rectangle>()?),
+                    None => None,
                 };
 
                 let color_space = opts
@@ -2225,7 +2241,7 @@ mod tests {
         let (base_width, base_height) = (base.width() as usize, base.height() as usize);
         let (layer_width, layer_height) = (layer.width() as usize, layer.height() as usize);
 
-        base.blend(&layer, Rectangle::default(), None)?;
+        base.blend(&layer, None, None)?;
 
         let after = base.to_rgba8();
         let after = after.as_slice();
@@ -2263,7 +2279,7 @@ mod tests {
             .map(|i| layer.buffer.at(i))
             .collect();
 
-        base.blend(&layer, Rectangle::default(), None)?;
+        base.blend(&layer, None, None)?;
 
         let actual = base.to_rgba8();
         let actual = actual.as_slice();
@@ -2289,7 +2305,7 @@ mod tests {
         let white = square([1.0, 1.0, 1.0, 1.0], 2, Scale::default())?;
 
         let mut base = black.clone();
-        base.blend(&white, Rectangle::new(-1.0, -1.0, 0.0, 0.0), None)?;
+        base.blend(&white, Some(Rectangle::new(-1.0, -1.0, 2.0, 2.0)), None)?;
         let rgba = base.to_rgba8();
         let rgba = rgba.as_slice();
         assert_eq!(&rgba[0..4], &[255, 255, 255, 255]);
@@ -2298,7 +2314,7 @@ mod tests {
         }
 
         let mut base = black.clone();
-        base.blend(&white, Rectangle::new(3.0, 3.0, 0.0, 0.0), None)?;
+        base.blend(&white, Some(Rectangle::new(3.0, 3.0, 2.0, 2.0)), None)?;
         let rgba = base.to_rgba8();
         let rgba = rgba.as_slice();
         for i in 0..15 {
@@ -2315,9 +2331,9 @@ mod tests {
         let layer = synthetic_linear(&[[0.5, 0.5, 0.5, 0.5]; 2], Scale::default())?;
 
         let mut linear = base.clone();
-        linear.blend(&layer, Rectangle::default(), None)?;
+        linear.blend(&layer, None, None)?;
         let mut srgb = base.clone();
-        srgb.blend(&layer, Rectangle::default(), Some(color::Space::Srgb))?;
+        srgb.blend(&layer, None, Some(color::Space::Srgb))?;
 
         for i in 0..2 {
             let opaque = Color::from_rgba([0.5, 0.5, 0.5, 1.0]);
@@ -2347,7 +2363,7 @@ mod tests {
             Image::<color::Linear>::new(Scale::new(0.5), 512.0, 512.0, Color::TRANSPARENT)?;
         let layer = Image::<color::Linear>::load(&lenna, Scale::new(0.5)).unwrap();
 
-        base.blend(&layer, Rectangle::default(), None)?;
+        base.blend(&layer, None, None)?;
 
         let mut expected = layer.clone();
         expected.resize(
@@ -2740,7 +2756,7 @@ mod tests {
 
         let mut layer = Reference::blank(Scale::default(), 50.0, 50.0, white, color::Space::Linear);
 
-        base.blend(&layer, Rectangle::new(0.0, 0.0, 50.0, 50.0), None);
+        base.blend(&layer, None, None);
         layer.resize(
             Dimension::Both {
                 width: 25.0,
