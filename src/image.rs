@@ -58,6 +58,22 @@ pub enum Mode {
     Cover,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AlignX {
+    Left,
+    #[default]
+    Center,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AlignY {
+    Top,
+    #[default]
+    Center,
+    Bottom,
+}
+
 impl<Space: 'static> Image<Space> {
     pub fn new(scale: Scale, width: f32, height: f32, color: Color) -> Result<Self>
     where
@@ -179,6 +195,8 @@ impl<Space: 'static> Image<Space> {
         dimension: Dimension,
         filter: color::Filter,
         mode: Mode,
+        align_x: AlignX,
+        align_y: AlignY,
         scale: Option<Scale>,
     ) -> Result<()> {
         let (new_width, new_height) = match dimension {
@@ -212,8 +230,16 @@ impl<Space: 'static> Image<Space> {
             Mode::Stretch => new_viewport,
         };
 
-        let left = (box_viewport.width() - new_viewport.width()) / 2;
-        let top = (box_viewport.height() - new_viewport.height()) / 2;
+        let left = match align_x {
+            AlignX::Left => 0,
+            AlignX::Center => (box_viewport.width() - new_viewport.width()) / 2,
+            AlignX::Right => box_viewport.width() - new_viewport.width(),
+        };
+        let top = match align_y {
+            AlignY::Top => 0,
+            AlignY::Center => (box_viewport.height() - new_viewport.height()) / 2,
+            AlignY::Bottom => box_viewport.height() - new_viewport.height(),
+        };
         let (box_w, box_h) = (box_viewport.width(), box_viewport.height());
         let resized = box_w != self.width() || box_h != self.height();
         let buffer = Arc::make_mut(&mut self.buffer);
@@ -224,7 +250,7 @@ impl<Space: 'static> Image<Space> {
             buffer.resize(filter, width, height, box_w, box_h);
         }
 
-        if left != 0 || top != 0 {
+        if box_w != new_viewport.width() || box_h != new_viewport.height() {
             let (target_w, target_h) = (new_viewport.width(), new_viewport.height());
 
             buffer.crop(box_w, left, top, target_w, target_h);
@@ -266,6 +292,8 @@ impl<Space: 'static> Image<Space> {
                 },
                 color::Filter::default(),
                 Mode::Stretch,
+                AlignX::default(),
+                AlignY::default(),
                 Some(scale),
             )?;
 
@@ -967,9 +995,11 @@ impl Reference {
         dimension: Dimension,
         filter: color::Filter,
         mode: Mode,
+        align_x: AlignX,
+        align_y: AlignY,
         scale: Option<Scale>,
     ) {
-        self.replace(move |source| source.resize(dimension, filter, mode, scale));
+        self.replace(move |source| source.resize(dimension, filter, mode, align_x, align_y, scale));
     }
 
     fn autocontrast(&mut self) {
@@ -1208,11 +1238,13 @@ impl Value {
         dimension: Dimension,
         filter: color::Filter,
         mode: Mode,
+        align_x: AlignX,
+        align_y: AlignY,
         scale: Option<Scale>,
     ) -> Result<()> {
         match self {
-            Value::Linear(image) => image.resize(dimension, filter, mode, scale),
-            Value::Srgb(image) => image.resize(dimension, filter, mode, scale),
+            Value::Linear(image) => image.resize(dimension, filter, mode, align_x, align_y, scale),
+            Value::Srgb(image) => image.resize(dimension, filter, mode, align_x, align_y, scale),
         }
     }
 
@@ -1368,6 +1400,8 @@ impl UserData for Reference {
             let height: Option<f32> = opts.get("height")?;
             let filter: Option<String> = opts.get("filter")?;
             let mode: Option<String> = opts.get("mode")?;
+            let align_x: Option<String> = opts.get("align_x")?;
+            let align_y: Option<String> = opts.get("align_y")?;
 
             let dimension = match (width, height) {
                 (Some(width), Some(height)) => Dimension::Both { width, height },
@@ -1401,7 +1435,31 @@ impl UserData for Reference {
                 }
             };
 
-            this.resize(dimension, filter, mode, None);
+            let align_x = match align_x.as_deref() {
+                None => AlignX::default(),
+                Some("left") => AlignX::Left,
+                Some("center") => AlignX::Center,
+                Some("right") => AlignX::Right,
+                Some(other) => {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "resize: unknown align_x: {other}"
+                    )));
+                }
+            };
+
+            let align_y = match align_y.as_deref() {
+                None => AlignY::default(),
+                Some("top") => AlignY::Top,
+                Some("center") => AlignY::Center,
+                Some("bottom") => AlignY::Bottom,
+                Some(other) => {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "resize: unknown align_y: {other}"
+                    )));
+                }
+            };
+
+            this.resize(dimension, filter, mode, align_x, align_y, None);
             Ok(())
         });
         methods.add_method_mut(
@@ -1584,7 +1642,7 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
 
-    use super::{Dimension, Image, Mode, Reference};
+    use super::{AlignX, AlignY, Dimension, Image, Mode, Reference};
     use crate::color;
     use crate::text::Text;
     use crate::{Color, Rectangle, Result, Scale, Viewport};
@@ -1651,6 +1709,8 @@ mod tests {
             },
             color::Filter::Lanczos,
             Mode::Stretch,
+            AlignX::default(),
+            AlignY::default(),
             Some(Scale::new(0.5)),
         )?;
         assert_eq!((image.width(), image.height()), (100, 125));
@@ -1665,6 +1725,8 @@ mod tests {
             },
             color::Filter::Cubic,
             Mode::Cover,
+            AlignX::default(),
+            AlignY::default(),
             Some(Scale::new(0.5)),
         )?;
         assert_eq!((fork.width(), fork.height()), (200, 50));
@@ -1677,6 +1739,8 @@ mod tests {
             },
             color::Filter::Cubic,
             Mode::Stretch,
+            AlignX::default(),
+            AlignY::default(),
             Some(Scale::new(2.0)),
         )?;
         assert_eq!(image.viewport.scale(), Scale::new(2.0));
@@ -1706,6 +1770,8 @@ mod tests {
                     },
                     filter,
                     Mode::Stretch,
+                    AlignX::default(),
+                    AlignY::default(),
                     None,
                 )?;
                 for pixel in image.to_rgba8().as_slice().chunks(4) {
@@ -1726,6 +1792,8 @@ mod tests {
             Dimension::Width(128.0),
             color::Filter::default(),
             Mode::default(),
+            AlignX::default(),
+            AlignY::default(),
             None,
         )?;
         assert_eq!(
@@ -1738,12 +1806,87 @@ mod tests {
             Dimension::Height(16.0),
             color::Filter::default(),
             Mode::default(),
+            AlignX::default(),
+            AlignY::default(),
             None,
         )?;
         assert_eq!(
             (image.logical_width(), image.logical_height()),
             (32.0, 16.0)
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn the_cover_resize_aligns_the_crop_window_horizontally() -> Result<()> {
+        let red8 = [255u8, 0, 0, 255];
+        let blue8 = [0u8, 0, 255, 255];
+        let red = Color::from_rgba([1.0, 0.0, 0.0, 1.0]).demultiply();
+        let blue = Color::from_rgba([0.0, 0.0, 1.0, 1.0]).demultiply();
+
+        let mut row = Vec::new();
+        row.extend(red8.repeat(25));
+        row.extend(blue8.repeat(25));
+
+        for (align_x, expected) in [
+            (AlignX::Left, red8.repeat(50 * 50)),
+            (AlignX::Center, row.repeat(50)),
+            (AlignX::Right, blue8.repeat(50 * 50)),
+        ] {
+            let mut image = Image::<color::Linear>::new(Scale::default(), 100.0, 50.0, red)?;
+            image.fill(Rectangle::new(50.0, 0.0, 50.0, 50.0), blue);
+
+            image.resize(
+                Dimension::Both {
+                    width: 50.0,
+                    height: 50.0,
+                },
+                color::Filter::default(),
+                Mode::Cover,
+                align_x,
+                AlignY::default(),
+                None,
+            )?;
+
+            assert_eq!(image.to_rgba8().as_slice(), expected.as_slice());
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn the_cover_resize_aligns_the_crop_window_vertically() -> Result<()> {
+        let red8 = [255u8, 0, 0, 255];
+        let blue8 = [0u8, 0, 255, 255];
+        let red = Color::from_rgba([1.0, 0.0, 0.0, 1.0]).demultiply();
+        let blue = Color::from_rgba([0.0, 0.0, 1.0, 1.0]).demultiply();
+
+        let mut center = red8.repeat(25 * 50);
+        center.extend(blue8.repeat(25 * 50));
+
+        for (align_y, expected) in [
+            (AlignY::Top, red8.repeat(50 * 50)),
+            (AlignY::Center, center),
+            (AlignY::Bottom, blue8.repeat(50 * 50)),
+        ] {
+            let mut image = Image::<color::Linear>::new(Scale::default(), 50.0, 100.0, red)?;
+            image.fill(Rectangle::new(0.0, 50.0, 50.0, 50.0), blue);
+
+            image.resize(
+                Dimension::Both {
+                    width: 50.0,
+                    height: 50.0,
+                },
+                color::Filter::default(),
+                Mode::Cover,
+                AlignX::default(),
+                align_y,
+                None,
+            )?;
+
+            assert_eq!(image.to_rgba8().as_slice(), expected.as_slice());
+        }
 
         Ok(())
     }
@@ -2214,6 +2357,8 @@ mod tests {
             },
             color::Filter::default(),
             Mode::Stretch,
+            AlignX::default(),
+            AlignY::default(),
             Some(Scale::new(0.5)),
         )?;
         assert_eq!(base.to_rgba8().as_slice(), expected.to_rgba8().as_slice());
@@ -2535,6 +2680,8 @@ mod tests {
             },
             color::Filter::Cubic,
             Mode::Stretch,
+            AlignX::default(),
+            AlignY::default(),
             None,
         );
 
@@ -2601,6 +2748,8 @@ mod tests {
             },
             color::Filter::Cubic,
             Mode::Stretch,
+            AlignX::default(),
+            AlignY::default(),
             None,
         );
 
