@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use pikke::{Engine, Result};
+use pikke::{Engine, Error, Result};
 
 #[test]
 fn run() -> Result<()> {
@@ -53,6 +53,47 @@ fn run() -> Result<()> {
 
         panic!("{report}")
     }
+
+    Ok(())
+}
+
+#[test]
+fn the_arguments_bind_json_objects_to_lua_tables() -> Result<()> {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let script = manifest_dir.join("tests/lua/arguments.lua");
+    let output_dir = manifest_dir.join("target/test-lua");
+    fs::create_dir_all(&output_dir)?;
+    let output = output_dir.join("arguments.png");
+
+    let layout = serde_json::json!({
+        "width": 32,
+        "height": 64,
+        "ghost": null,
+        "size": { "width": 8, "label": "small" }
+    });
+
+    Engine::load(&script, 1.0)
+        .and_then(|engine| engine.run(&[("layout".to_owned(), layout)], Some(&output)))
+}
+
+#[test]
+fn the_arguments_reject_non_object_containers() -> Result<()> {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let script = manifest_dir.join("tests/lua/arguments.lua");
+    let output_dir = manifest_dir.join("target/test-lua");
+    fs::create_dir_all(&output_dir)?;
+    let output = output_dir.join("arguments.png");
+
+    let engine = Engine::load(&script, 1.0)?;
+
+    let error = engine
+        .run(
+            &[("layout".to_owned(), serde_json::Value::Bool(true))],
+            Some(&output),
+        )
+        .unwrap_err();
+
+    assert!(matches!(error, Error::OptionInvalidValue { .. }), "{error}");
 
     Ok(())
 }

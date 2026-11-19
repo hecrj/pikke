@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use mlua::{AnyUserData, Function, Lua, Table};
+use mlua::{AnyUserData, Function, IntoLua, Lua, Table, Value};
 
 use crate::{
     Error, Result, Scale, Video, color, font, gradient, image, path, point, rectangle, stream, text,
@@ -86,7 +86,7 @@ impl Engine {
         &self.arguments
     }
 
-    pub fn run(&self, params: &[(String, Option<String>)], output: Option<&Path>) -> Result<()> {
+    pub fn run(&self, params: &[(String, serde_json::Value)], output: Option<&Path>) -> Result<()> {
         let script = self.script.clone();
 
         let output = output
@@ -147,7 +147,9 @@ impl Engine {
         let args = self.lua.create_table()?;
 
         for (name, value) in params {
-            args.set(name.as_str(), value.clone())?;
+            let value = lua_value(&self.lua, name.as_str(), value)?;
+
+            args.set(name.as_str(), value)?;
         }
 
         self.render.call::<()>(args)?;
@@ -174,6 +176,48 @@ fn default_output(script: &Path) -> PathBuf {
         .file_name()
         .map(|name| Path::new(name).with_extension("png"))
         .unwrap_or(PathBuf::from("output.png"))
+}
+
+fn lua_value(lua: &Lua, option: &str, value: &serde_json::Value) -> Result<Value> {
+    Ok(match value {
+        serde_json::Value::Null => Value::Nil,
+        serde_json::Value::String(value) => value.as_str().into_lua(lua)?,
+        serde_json::Value::Number(number) => {
+            if let Some(integer) = number.as_i64() {
+                integer.into_lua(lua)?
+            } else {
+                number
+                    .as_f64()
+                    .expect("a JSON number is always a float")
+                    .into_lua(lua)?
+            }
+        }
+        serde_json::Value::Object(object) => {
+            let table = lua.create_table()?;
+
+            for (key, value) in object {
+                table.set(key.as_str(), lua_value(lua, option, value)?)?;
+            }
+
+            Value::Table(table)
+        }
+        serde_json::Value::Array(array) => {
+            let table = lua.create_table()?;
+
+            for value in array {
+                table.push(lua_value(lua, option, value)?)?;
+            }
+
+            Value::Table(table)
+        }
+        value => {
+            return Err(Error::OptionInvalidValue {
+                option: option.to_owned(),
+                value: value.to_string(),
+                note: "must be a string, number, null, or object".to_owned(),
+            });
+        }
+    })
 }
 
 fn arguments(script: &Path, module: &Table) -> Result<Vec<String>> {

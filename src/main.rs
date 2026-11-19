@@ -164,13 +164,14 @@ fn run() -> Result<()> {
         .arguments()
         .iter()
         .map(|argument| {
-            (
-                argument.clone(),
-                values
-                    .get(argument)
-                    .cloned()
-                    .filter(|value| !value.is_empty()),
-            )
+            let value = values
+                .get(argument)
+                .cloned()
+                .filter(|value| !value.is_empty())
+                .map(serde_json::Value::String)
+                .unwrap_or(serde_json::Value::Null);
+
+            (argument.clone(), value)
         })
         .collect();
 
@@ -180,8 +181,9 @@ fn run() -> Result<()> {
         arguments
             .iter()
             .map(|(name, value)| match value {
-                Some(value) => format!("{name}={value}"),
-                None => format!("{name}=nil"),
+                serde_json::Value::Null => format!("{name}=nil"),
+                serde_json::Value::String(value) => format!("{name}={value}"),
+                value => format!("{name}={value}"),
             })
             .collect::<Vec<_>>()
             .join(" ")
@@ -233,7 +235,8 @@ Options:
     help.push_str(
         "\nAn omitted or empty option binds nil.\n\n\
         A --stdin job is a JSON object per line: its keys bind the\n\
-        options as strings, numbers, or null.",
+        options as strings, numbers, nulls, or objects. An object\n\
+        binds a table, nested objects included.",
     );
 
     help
@@ -274,10 +277,7 @@ fn batch(
             .map(std::path::PathBuf::from)
             .ok_or_else(|| Error::NoBatchOutput(job.to_owned()))?;
 
-        let arguments: Vec<_> = values
-            .into_iter()
-            .map(|(key, value)| argument(&key, value))
-            .collect::<Result<_>>()?;
+        let arguments: Vec<_> = values.into_iter().collect();
 
         ENGINE.with(|cell| {
             let engine = cell
@@ -348,27 +348,10 @@ fn batch(
     Ok(())
 }
 
-fn argument(key: &str, value: serde_json::Value) -> Result<(String, Option<String>)> {
-    let value = match value {
-        serde_json::Value::String(value) => Some(value),
-        serde_json::Value::Number(value) => Some(value.to_string()),
-        serde_json::Value::Null => None,
-        value => {
-            return Err(Error::OptionInvalidValue {
-                option: key.to_owned(),
-                value: value.to_string(),
-                note: "must be a string, number, or null".to_owned(),
-            });
-        }
-    };
-
-    Ok((key.to_owned(), value))
-}
-
 fn watch(
     script: &std::path::Path,
     scale: impl Into<Scale>,
-    arguments: &[(String, Option<String>)],
+    arguments: &[(String, serde_json::Value)],
     output: Option<&std::path::Path>,
 ) -> Result<()> {
     let Some(parent) = script.parent() else {
@@ -415,34 +398,5 @@ fn watch(
         let _ = Engine::load(script, scale)
             .and_then(|engine| engine.run(arguments, output))
             .inspect_err(|error| eprintln!("error running {}: {error}", script.display()));
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::argument;
-    use pikke::Error;
-
-    #[test]
-    fn the_argument_binds_strings_numbers_and_null() {
-        assert_eq!(
-            argument("tint", serde_json::Value::String("1".to_owned())).unwrap(),
-            ("tint".to_owned(), Some("1".to_owned()))
-        );
-        assert_eq!(
-            argument("size", serde_json::Value::Number(2.into())).unwrap(),
-            ("size".to_owned(), Some("2".to_owned()))
-        );
-        assert_eq!(
-            argument("tint", serde_json::Value::Null).unwrap(),
-            ("tint".to_owned(), None)
-        );
-    }
-
-    #[test]
-    fn the_argument_rejects_other_value_types() {
-        let error = argument("tint", serde_json::Value::Bool(true)).unwrap_err();
-
-        assert!(matches!(error, Error::OptionInvalidValue { .. }), "{error}");
     }
 }
