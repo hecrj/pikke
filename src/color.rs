@@ -472,7 +472,7 @@ impl UserData for Color {
 
                 if !alpha.is_finite() {
                     return Err(mlua::Error::RuntimeError(
-                        "with_luma: 'alpha' must be finite".to_owned(),
+                        "with_alpha: 'alpha' must be finite".to_owned(),
                     ));
                 }
 
@@ -1155,6 +1155,10 @@ pub struct Oklch {
 }
 
 impl Oklch {
+    pub fn with_alpha(self, a: f32) -> Self {
+        Self { a, ..self }
+    }
+
     pub fn to_linear_rgb(self) -> Color {
         const LMS_L_A: f64 = 0.3963377774;
         const LMS_L_B: f64 = 0.2158037573;
@@ -1220,6 +1224,23 @@ impl UserData for Oklch {
             this.a = lua::number("set", "a", Some(value))?;
             Ok(())
         });
+    }
+
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method(
+            "with_alpha",
+            |_lua, this, alpha: Value| -> mlua::Result<Self> {
+                let alpha = lua::number("with_alpha", "alpha", Some(alpha))?;
+
+                if !alpha.is_finite() {
+                    return Err(mlua::Error::RuntimeError(
+                        "with_alpha: 'alpha' must be finite".to_owned(),
+                    ));
+                }
+
+                Ok(this.with_alpha(alpha))
+            },
+        );
     }
 }
 
