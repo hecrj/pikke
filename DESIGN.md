@@ -103,6 +103,7 @@ change is a script edit; an op-behavior change is an engine edit.
 | `fill` | `img:fill(region, paint)` | Paint `region` (a `Rectangle`, `Text`, or `Path`) with `paint` (a `Color`, an `Oklch`, a hex string, or a `Gradient`). The space is chosen by the region's kind: a `Text` region composites in sRGB, a `Rectangle` or `Path` region in linear. In place. |
 | `luma_in` | `img:luma_in(region) → number` | Mean luma of `region` (a `Rectangle`), 0–255 (see *Luma*). |
 | `dominant_in` | `img:dominant_in(region) → Color` | The dominant color of `region` (a `Rectangle`): the demultiplied linear channels, clamped to 0–1, quantized to 4 bits, the most-populated bucket weighted by alpha, returned as that bucket's alpha-weighted mean. An empty or fully transparent region is transparent. |
+| `vivid_in` | `img:vivid_in(region) → Color` | The vivid color of `region` (a `Rectangle`): the same 4-bit alpha-weighted histogram as `dominant_in`; a bucket qualifies when it carries at least 0.2% of the region's alpha weight and its mean is distinctly non-gray (OKLCh chroma ≥ 0.08), and it is scored by its alpha weight × its OKLCh chroma — the highest-scoring bucket, heavier on ties, is returned as its alpha-weighted mean. When no bucket qualifies the most common color (as `dominant_in` returns) stands in — it may be a black or a gray. An empty or fully transparent region is transparent. |
 | `coverage_in` | `img:coverage_in(region) → number` | The count of non-transparent pixels of `region` (a `Rectangle`): the physical pixels whose alpha is nonzero, the region clipped to the image. |
 | `pixel` | `img:pixel(x, y) → Pixel` | The pixel at `(x, y)` (logical px) as a `Pixel` (sRGB, 0–255, § Pixel); nil outside the image. |
 | `detect` | `img:detect(color, {tolerance}) → iterator` | A lazy iterator over the 4-connected components of `color` (a `Color`, an `Oklch`, or a hex string): a pixel matches when every stored premultiplied channel lies within `tolerance` (a number ≥ 0, default 0 — an exact match; a tolerance recovers masks in resized, anti-aliased images) of `color`'s, yielding each component's bounding `Rectangle` (logical px) in scan order. The generic-`for` loop drives it — no match yields `nil` immediately. |
@@ -234,7 +235,7 @@ returns `h` canonicalized to 0–360.
 `fill` transforms an `Oklch` to a linear `Color` before painting (the
 inverse of `to_oklch`). Out-of-gamut chroma yields linear channels
 outside 0–1 (linear light is unbounded); the encode and the
-bounded-domain ops (`dominant_in`) clamp to the gamut.
+bounded-domain ops (`dominant_in`, `vivid_in`) clamp to the gamut.
 
 ## Units
 

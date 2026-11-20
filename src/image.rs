@@ -806,6 +806,136 @@ impl<Space: 'static> Image<Space> {
         .demultiply())
     }
 
+    pub fn vivid_in(&self, region: Rectangle) -> Result<Color>
+    where
+        Space: color::ToSpace<color::Linear>,
+    {
+        const MINIMUM_CHROMA: f32 = 0.08;
+        const MINIMUM_SHARE: f32 = 0.002;
+
+        #[derive(Clone, Default)]
+        struct Bucket {
+            weight: f32,
+            r: f32,
+            g: f32,
+            b: f32,
+            a: f32,
+        }
+
+        let scale = self.viewport.scale();
+        let left = scale.to_physical_signed(region.x)?;
+        let top = scale.to_physical_signed(region.y)?;
+        let right = scale.to_physical_signed(region.x + region.width)?;
+        let bottom = scale.to_physical_signed(region.y + region.height)?;
+
+        let left = left.max(0).min(self.width() as i32);
+        let top = top.max(0).min(self.height() as i32);
+        let right = right.max(0).min(self.width() as i32);
+        let bottom = bottom.max(0).min(self.height() as i32);
+
+        if left >= right || top >= bottom {
+            return Ok(Color::TRANSPARENT);
+        }
+
+        let width = self.width() as usize;
+        let (left, right) = (left as usize, right as usize);
+
+        let mut buckets = vec![Bucket::default(); 16 * 16 * 16];
+
+        for row in top as usize..bottom as usize {
+            let row = self.buffer.row(row, width).crop(left, right);
+
+            for color in row.iter() {
+                let color = color.to_space();
+                let a = color.a;
+
+                if a > 0.0 {
+                    let r = (color.r / a).clamp(0.0, 1.0);
+                    let g = (color.g / a).clamp(0.0, 1.0);
+                    let b = (color.b / a).clamp(0.0, 1.0);
+
+                    let bucket_index = (r * 15.0).round() as usize
+                        + (g * 15.0).round() as usize * 16
+                        + (b * 15.0).round() as usize;
+
+                    let bucket = &mut buckets[bucket_index];
+                    bucket.weight += a;
+                    bucket.r += r * a;
+                    bucket.g += g * a;
+                    bucket.b += b * a;
+                    bucket.a += a * a;
+                }
+            }
+        }
+
+        let weight = buckets.iter().map(|bucket| bucket.weight).sum::<f32>();
+
+        if weight == 0.0 {
+            return Ok(Color::TRANSPARENT);
+        }
+
+        let best = buckets
+            .iter()
+            .enumerate()
+            .filter_map(|(index, bucket)| {
+                if bucket.weight >= MINIMUM_SHARE * weight {
+                    let alpha = bucket.a / bucket.weight;
+
+                    let color = color::Color::<color::Linear, color::Premultiplied>::from_rgba([
+                        bucket.r / bucket.weight * alpha,
+                        bucket.g / bucket.weight * alpha,
+                        bucket.b / bucket.weight * alpha,
+                        alpha,
+                    ]);
+
+                    let oklch = color.demultiply().to_oklch();
+
+                    if oklch.c >= MINIMUM_CHROMA {
+                        Some((index, bucket.weight * oklch.c, bucket.weight))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .max_by(|(_, first, first_weight), (_, second, second_weight)| {
+                first
+                    .partial_cmp(second)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| {
+                        first_weight
+                            .partial_cmp(second_weight)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+            });
+
+        let index = match best {
+            Some((index, _, _)) => index,
+            None => buckets
+                .iter()
+                .enumerate()
+                .max_by(|(_, first), (_, second)| {
+                    first
+                        .weight
+                        .partial_cmp(&second.weight)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .map(|(index, _)| index)
+                .unwrap_or(0),
+        };
+        let bucket = &buckets[index];
+        let alpha = bucket.a / bucket.weight;
+
+        Ok(Color::from_rgba([
+            bucket.r / bucket.weight * alpha,
+            bucket.g / bucket.weight * alpha,
+            bucket.b / bucket.weight * alpha,
+            alpha,
+        ])
+        .demultiply())
+    }
+
     pub fn coverage_in(&self, region: Rectangle) -> Result<usize> {
         let scale = self.viewport.scale();
         let left = scale.to_physical_signed(region.x)?;
@@ -1123,6 +1253,10 @@ impl Reference {
         self.evaluate(|image| image.dominant_in(region))
     }
 
+    fn vivid_in(&self, region: Rectangle) -> Result<Color> {
+        self.evaluate(|image| image.vivid_in(region))
+    }
+
     fn coverage_in(&self, region: Rectangle) -> Result<usize> {
         self.evaluate(|image| image.coverage_in(region))
     }
@@ -1409,6 +1543,13 @@ impl Value {
         }
     }
 
+    pub fn vivid_in(&self, region: Rectangle) -> Result<Color> {
+        match self {
+            Value::Linear(image) => image.vivid_in(region),
+            Value::Srgb(image) => image.vivid_in(region),
+        }
+    }
+
     pub fn coverage_in(&self, region: Rectangle) -> Result<usize> {
         match self {
             Value::Linear(image) => image.coverage_in(region),
@@ -1646,6 +1787,14 @@ impl UserData for Reference {
             |_lua, this, region: AnyUserData| -> mlua::Result<Color> {
                 let region: Rectangle = *region.borrow::<Rectangle>()?;
                 Ok(this.dominant_in(region)?)
+            },
+        );
+
+        methods.add_method(
+            "vivid_in",
+            |_lua, this, region: AnyUserData| -> mlua::Result<Color> {
+                let region: Rectangle = *region.borrow::<Rectangle>()?;
+                Ok(this.vivid_in(region)?)
             },
         );
 
