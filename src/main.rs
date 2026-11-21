@@ -6,7 +6,7 @@ use std::thread;
 
 use notify::Watcher;
 
-use pikke::{Engine, Error, Result, Scale};
+use pikke::{Compression, Engine, Error, Result, Scale};
 
 fn main() -> ExitCode {
     match run() {
@@ -100,6 +100,7 @@ fn run() -> Result<()> {
     let mut show_help = false;
     let mut stdin = false;
     let mut must_watch = false;
+    let mut compression = Compression::default();
     let mut output = None;
     let mut values = BTreeMap::new();
 
@@ -113,6 +114,9 @@ fn run() -> Result<()> {
             }
             "--watch" => {
                 must_watch = true;
+            }
+            "--release" => {
+                compression = Compression::High;
             }
             "--scale" => {
                 // Already parsed
@@ -157,7 +161,7 @@ fn run() -> Result<()> {
 
     if stdin {
         let arguments = engine.arguments();
-        return batch(script, scale, arguments, io::stdin());
+        return batch(script, scale, arguments, compression, io::stdin());
     }
 
     let arguments: Vec<_> = engine
@@ -190,10 +194,10 @@ fn run() -> Result<()> {
     );
 
     let output = output.as_deref().map(std::path::Path::new);
-    engine.run(&arguments, output)?;
+    engine.run(&arguments, output, compression)?;
 
     if must_watch {
-        return watch(script, scale, &arguments, output);
+        return watch(script, scale, &arguments, output, compression);
     }
 
     Ok(())
@@ -213,6 +217,7 @@ Options:
   --scale <s>       The run's scale (default 1)
   --threads <n>     The worker thread count (default: core count)
   --output <path>   The still's path; the video is the same path as .mp4 (default <script>.png)
+  --release         Enable release profile (highest compression settings)
   --stdin           Read jobs from stdin, one JSON object per line
   --help            Print this help",
     );
@@ -246,6 +251,7 @@ fn batch(
     script: &std::path::Path,
     scale: f32,
     arguments: &[String],
+    compression: Compression,
     input: impl io::Read + Send,
 ) -> Result<()> {
     use std::cell::OnceCell;
@@ -259,7 +265,13 @@ fn batch(
         static ENGINE: OnceCell<Result<Engine>> = const { OnceCell::new() };
     }
 
-    fn work(script: PathBuf, arguments: &[String], scale: f32, job: &str) -> Result<()> {
+    fn work(
+        script: PathBuf,
+        arguments: &[String],
+        scale: f32,
+        compression: Compression,
+        job: &str,
+    ) -> Result<()> {
         let mut values: serde_json::Map<String, serde_json::Value> = serde_json::from_str(job)?;
 
         for key in values.keys() {
@@ -285,7 +297,7 @@ fn batch(
                 .as_ref()
                 .map_err(Error::clone)?;
 
-            engine.run(&arguments, Some(&output))
+            engine.run(&arguments, Some(&output), compression)
         })
     }
 
@@ -316,7 +328,7 @@ fn batch(
         let sender = sender.clone();
 
         rayon::spawn(move || {
-            if let Err(error) = work(script, &arguments, scale, &job) {
+            if let Err(error) = work(script, &arguments, scale, compression, &job) {
                 errors
                     .lock()
                     .expect("lock errors")
@@ -353,6 +365,7 @@ fn watch(
     scale: impl Into<Scale>,
     arguments: &[(String, serde_json::Value)],
     output: Option<&std::path::Path>,
+    compression: Compression,
 ) -> Result<()> {
     let Some(parent) = script.parent() else {
         return Err(io::Error::other("script has no parent directory").into());
@@ -396,7 +409,7 @@ fn watch(
         println!("[#{i:<04}] -------------------");
 
         let _ = Engine::load(script, scale)
-            .and_then(|engine| engine.run(arguments, output))
+            .and_then(|engine| engine.run(arguments, output, compression))
             .inspect_err(|error| eprintln!("error running {}: {error}", script.display()));
     }
 }

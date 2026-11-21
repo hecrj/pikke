@@ -3,8 +3,8 @@ use std::path;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-use image::{ColorType, ImageFormat};
 use mlua::{AnyUserData, Lua, Table, UserData, UserDataFields, UserDataMethods};
+use png::{BitDepth, ColorType, Encoder};
 use skrifa::outline::{OutlineGlyphCollection, OutlinePen};
 use skrifa::prelude::{FontRef, GlyphId, LocationRef, NormalizedCoord, Size};
 use vello_cpu::kurbo::{Affine, BezPath, Rect};
@@ -72,6 +72,13 @@ pub enum AlignY {
     #[default]
     Center,
     Bottom,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Compression {
+    #[default]
+    Balanced,
+    High,
 }
 
 impl<Space: 'static> Image<Space> {
@@ -1085,7 +1092,7 @@ impl<Space: 'static> Image<Space> {
         }
     }
 
-    pub fn write(&self, output: &path::Path) -> Result<()>
+    pub fn write(&self, output: &path::Path, compression: Compression) -> Result<()>
     where
         Space: color::ToSpace<color::Srgb>,
     {
@@ -1098,15 +1105,24 @@ impl<Space: 'static> Image<Space> {
         let temp = output.with_file_name(temp_name);
 
         let rgba8 = self.to_rgba8();
-        image::save_buffer_with_format(
-            &temp,
-            rgba8.as_slice(),
-            u32::from(self.width()),
-            u32::from(self.height()),
-            ColorType::Rgba8,
-            ImageFormat::Png,
-        )
-        .inspect_err(|_| {
+        let compression = match compression {
+            Compression::Balanced => png::Compression::default(),
+            Compression::High => png::Compression::High,
+        };
+
+        let encode = || -> std::result::Result<(), io::Error> {
+            let file = std::fs::File::create(&temp)?;
+            let mut encoder = Encoder::new(file, u32::from(self.width()), u32::from(self.height()));
+            encoder.set_color(ColorType::Rgba);
+            encoder.set_depth(BitDepth::Eight);
+            encoder.set_compression(compression);
+            let mut writer = encoder.write_header()?;
+            writer.write_image_data(rgba8.as_slice())?;
+
+            Ok(())
+        };
+
+        encode().inspect_err(|_| {
             let _ = std::fs::remove_file(&temp);
         })?;
 
@@ -1573,10 +1589,10 @@ impl Value {
         }
     }
 
-    pub fn write(&self, output: &path::Path) -> Result<()> {
+    pub fn write(&self, output: &path::Path, compression: Compression) -> Result<()> {
         match self {
-            Value::Linear(image) => image.write(output),
-            Value::Srgb(image) => image.write(output),
+            Value::Linear(image) => image.write(output, compression),
+            Value::Srgb(image) => image.write(output, compression),
         }
     }
 }
@@ -1900,7 +1916,7 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
 
-    use super::{AlignX, AlignY, Dimension, Image, Mode, Reference};
+    use super::{AlignX, AlignY, Compression, Dimension, Image, Mode, Reference};
     use crate::color;
     use crate::text::Text;
     use crate::{Color, Rectangle, Result, Scale, Viewport};
@@ -2899,7 +2915,7 @@ mod tests {
             Color::from_pixel(color::Pixel::from_rgba8([0, 0, 0, 255])).to_linear(),
         );
 
-        source.write(&file)?;
+        source.write(&file, Compression::default())?;
         let left = left.image()?;
         std::fs::remove_file(&file)?;
         let right = right.image()?;

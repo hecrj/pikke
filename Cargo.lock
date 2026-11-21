@@ -963,6 +963,7 @@ dependencies = [
  "notify",
  "parlance",
  "parley",
+ "png",
  "rayon",
  "serde_json",
  "skrifa",

@@ -8,9 +8,10 @@ description = "A modern, Lua-driven image and video compositing engine"
 multithreading = []
 
 [dependencies]
-serde_json = "1"
 notify = "8"
+png = "0.18"
 rayon = "1"
+serde_json = "1"
 thiserror = "2"
 
 fontique = { version = "0.12", default-features = false, features = ["std"] }

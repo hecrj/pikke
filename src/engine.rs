@@ -4,7 +4,8 @@ use std::sync::Arc;
 use mlua::{AnyUserData, Function, IntoLua, Lua, Table, Value};
 
 use crate::{
-    Error, Result, Scale, Video, color, font, gradient, image, path, point, rectangle, stream, text,
+    Compression, Error, Result, Scale, Video, color, font, gradient, image, path, point, rectangle,
+    stream, text,
 };
 
 pub struct Engine {
@@ -86,7 +87,12 @@ impl Engine {
         &self.arguments
     }
 
-    pub fn run(&self, params: &[(String, serde_json::Value)], output: Option<&Path>) -> Result<()> {
+    pub fn run(
+        &self,
+        params: &[(String, serde_json::Value)],
+        output: Option<&Path>,
+        compression: Compression,
+    ) -> Result<()> {
         let script = self.script.clone();
 
         let output = output
@@ -128,7 +134,7 @@ impl Engine {
 
                     if number == 1 {
                         run = Some((width, height));
-                        image.write(&output)?;
+                        image.write(&output, compression)?;
 
                         eprintln!("output: {} ({width}×{height})", output.display(),);
                     }

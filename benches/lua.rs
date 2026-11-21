@@ -3,7 +3,7 @@ use std::path::Path;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 
-use pikke::Engine;
+use pikke::{Compression, Engine};
 
 fn lua_scripts(criterion: &mut Criterion) {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -45,7 +45,7 @@ fn lua_scripts(criterion: &mut Criterion) {
         group.bench_function(stem.to_string_lossy().into_owned(), move |benchmark| {
             benchmark.iter(|| {
                 engine
-                    .run(&[], Some(&output))
+                    .run(&[], Some(&output), Compression::default())
                     .expect("the benchmark script failed")
             });
         });

@@ -20,6 +20,7 @@ pub use color::Color;
 pub use engine::Engine;
 pub use error::Error;
 pub use gradient::Gradient;
+pub use image::Compression;
 pub use image::Image;
 pub use paint::Paint;
 pub use path::Path;
