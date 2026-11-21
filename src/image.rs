@@ -818,7 +818,9 @@ impl<Space: 'static> Image<Space> {
         Space: color::ToSpace<color::Linear>,
     {
         const MINIMUM_CHROMA: f32 = 0.08;
-        const MINIMUM_SHARE: f32 = 0.002;
+        const MINIMUM_SHARE: f32 = 0.001;
+        const CHROMA_EXPONENT: f32 = 1.7;
+        const SKIN_PENALTY: f32 = 0.95;
 
         #[derive(Clone, Default)]
         struct Bucket {
@@ -826,10 +828,25 @@ impl<Space: 'static> Image<Space> {
             r: f32,
             g: f32,
             b: f32,
-            a: f32,
+            alpha_sum: f32,
+            count: u32,
+        }
+
+        fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+            let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+            t * t * (3.0 - 2.0 * t)
+        }
+
+        fn skin_likelihood(l: f32, c: f32, h: f32) -> f32 {
+            let lightness = smoothstep(0.45, 0.60, l) * (1.0 - smoothstep(0.92, 0.98, l));
+            let chroma = smoothstep(0.025, 0.07, c) * (1.0 - smoothstep(0.16, 0.23, c));
+            let hue = smoothstep(30.0, 45.0, h) * (1.0 - smoothstep(90.0, 110.0, h));
+
+            lightness * chroma * hue
         }
 
         let scale = self.viewport.scale();
+
         let left = scale.to_physical_signed(region.x)?;
         let top = scale.to_physical_signed(region.y)?;
         let right = scale.to_physical_signed(region.x + region.width)?;
@@ -856,22 +873,31 @@ impl<Space: 'static> Image<Space> {
                 let color = color.to_space();
                 let a = color.a;
 
-                if a > 0.0 {
-                    let r = (color.r / a).clamp(0.0, 1.0);
-                    let g = (color.g / a).clamp(0.0, 1.0);
-                    let b = (color.b / a).clamp(0.0, 1.0);
-
-                    let bucket_index = (r * 15.0).round() as usize
-                        + (g * 15.0).round() as usize * 16
-                        + (b * 15.0).round() as usize;
-
-                    let bucket = &mut buckets[bucket_index];
-                    bucket.weight += a;
-                    bucket.r += r * a;
-                    bucket.g += g * a;
-                    bucket.b += b * a;
-                    bucket.a += a * a;
+                if a <= 0.0 {
+                    continue;
                 }
+
+                // Recover unpremultiplied linear RGB.
+                let r = (color.r / a).clamp(0.0, 1.0);
+                let g = (color.g / a).clamp(0.0, 1.0);
+                let b = (color.b / a).clamp(0.0, 1.0);
+
+                // Quantize linear RGB.
+                let ri = (r * 15.0).round() as usize;
+                let gi = (g * 15.0).round() as usize;
+                let bi = (b * 15.0).round() as usize;
+
+                // Correct 3D histogram indexing.
+                let bucket_index = ri + gi * 16 + bi * 256;
+
+                let bucket = &mut buckets[bucket_index];
+
+                bucket.weight += a;
+                bucket.r += r * a;
+                bucket.g += g * a;
+                bucket.b += b * a;
+                bucket.alpha_sum += a * a;
+                bucket.count += 1;
             }
         }
 
@@ -881,30 +907,38 @@ impl<Space: 'static> Image<Space> {
             return Ok(Color::TRANSPARENT);
         }
 
+        // Find the most representative vivid color.
         let best = buckets
             .iter()
             .enumerate()
             .filter_map(|(index, bucket)| {
-                if bucket.weight >= MINIMUM_SHARE * weight {
-                    let alpha = bucket.a / bucket.weight;
-
-                    let color = color::Color::<color::Linear, color::Premultiplied>::from_rgba([
-                        bucket.r / bucket.weight * alpha,
-                        bucket.g / bucket.weight * alpha,
-                        bucket.b / bucket.weight * alpha,
-                        alpha,
-                    ]);
-
-                    let oklch = color.demultiply().to_oklch();
-
-                    if oklch.c >= MINIMUM_CHROMA {
-                        Some((index, bucket.weight * oklch.c, bucket.weight))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
+                if bucket.weight < MINIMUM_SHARE * weight {
+                    return None;
                 }
+
+                let alpha = bucket.alpha_sum / bucket.weight;
+
+                let color = color::Color::<color::Linear, color::Premultiplied>::from_rgba([
+                    bucket.r / bucket.weight * alpha,
+                    bucket.g / bucket.weight * alpha,
+                    bucket.b / bucket.weight * alpha,
+                    alpha,
+                ]);
+
+                let oklch = color.demultiply().to_oklch();
+
+                if oklch.c < MINIMUM_CHROMA {
+                    return None;
+                }
+
+                let hue = oklch.h;
+
+                // Soft skin suppression.
+                let skin = skin_likelihood(oklch.l, oklch.c, hue);
+                let skin_weight = 1.0 - SKIN_PENALTY * skin;
+                let score = bucket.weight * skin_weight * oklch.c.powf(CHROMA_EXPONENT);
+
+                Some((index, score, bucket.weight))
             })
             .max_by(|(_, first, first_weight), (_, second, second_weight)| {
                 first
@@ -917,6 +951,8 @@ impl<Space: 'static> Image<Space> {
                     })
             });
 
+        // Fall back to the most common color if no vivid
+        // candidate was found.
         let index = match best {
             Some((index, _, _)) => index,
             None => buckets
@@ -931,8 +967,14 @@ impl<Space: 'static> Image<Space> {
                 .map(|(index, _)| index)
                 .unwrap_or(0),
         };
+
         let bucket = &buckets[index];
-        let alpha = bucket.a / bucket.weight;
+
+        if bucket.weight == 0.0 {
+            return Ok(Color::TRANSPARENT);
+        }
+
+        let alpha = bucket.alpha_sum / bucket.weight;
 
         Ok(Color::from_rgba([
             bucket.r / bucket.weight * alpha,
