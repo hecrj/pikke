@@ -8,6 +8,21 @@ use crate::{
     stream, text,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Settings {
+    pub compression: Compression,
+    pub scale_video: f32,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            compression: Compression::default(),
+            scale_video: 1.0,
+        }
+    }
+}
+
 pub struct Engine {
     script: PathBuf,
     lua: Lua,
@@ -91,7 +106,7 @@ impl Engine {
         &self,
         params: &[(String, serde_json::Value)],
         output: Option<&Path>,
-        compression: Compression,
+        settings: Settings,
     ) -> Result<()> {
         let script = self.script.clone();
 
@@ -107,7 +122,8 @@ impl Engine {
         let mut number = 0;
         let mut run = None;
 
-        self.lua.set_app_data(Video::new(&video));
+        self.lua
+            .set_app_data(Video::new(&video, settings.scale_video));
 
         self.env.set(
             "yield",
@@ -134,7 +150,7 @@ impl Engine {
 
                     if number == 1 {
                         run = Some((width, height));
-                        image.write(&output, compression)?;
+                        image.write(&output, settings.compression)?;
 
                         eprintln!("output: {} ({width}×{height})", output.display(),);
                     }

@@ -12,6 +12,7 @@ const STDERR_TAIL: usize = 1 << 20;
 
 pub struct Video {
     output: PathBuf,
+    scale: f32,
     frames: usize,
     state: State,
 }
@@ -32,9 +33,10 @@ enum State {
 }
 
 impl Video {
-    pub fn new(path: impl AsRef<Path>) -> Self {
+    pub fn new(path: impl AsRef<Path>, scale: f32) -> Self {
         Self {
             output: path.as_ref().to_path_buf(),
+            scale,
             frames: 0,
             state: State::Empty,
         }
@@ -62,7 +64,8 @@ impl Video {
                 let (sender, receiver) = mpsc::sync_channel(1);
 
                 let output = self.output.clone();
-                let handle = thread::spawn(move || worker(output, width, height, receiver));
+                let scale = self.scale;
+                let handle = thread::spawn(move || worker(output, width, height, scale, receiver));
 
                 sender.send(Some(first)).map_err(io::Error::other)?;
                 sender
@@ -101,6 +104,7 @@ fn worker(
     output: PathBuf,
     width: u16,
     height: u16,
+    scale: f32,
     receiver: mpsc::Receiver<Option<ToRgba>>,
 ) -> Result<()> {
     let file_name = output
@@ -115,27 +119,30 @@ fn worker(
 
     let _ = std::fs::remove_file(&temp);
 
-    let mut child = Command::new("ffmpeg")
-        .args(["-f", "rawvideo", "-pix_fmt", "rgba", "-s"])
-        .arg(format!("{width}x{height}"))
-        .args([
-            "-framerate",
-            "60",
-            "-i",
-            "-",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "slow",
-            "-crf",
-            "16",
-            "-pix_fmt",
-            "yuv420p",
-            "-movflags",
-            "+faststart",
-            "-f",
-            "mp4",
-        ])
+    let mut command = Command::new("ffmpeg");
+    command.args(["-f", "rawvideo", "-pix_fmt", "rgba", "-s"]);
+    command.arg(format!("{width}x{height}"));
+    command.args(["-framerate", "60", "-i", "-"]);
+
+    if scale != 1.0 {
+        command.args(["-vf", &format!("scale=iw*{scale}:-1:flags=lanczos")]);
+    }
+
+    command.args([
+        "-c:v",
+        "libx264",
+        "-preset",
+        "slow",
+        "-crf",
+        "16",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        "-f",
+        "mp4",
+    ]);
+    command
         .arg("-x264-params")
         .arg(format!(
             "threads={}",
@@ -144,7 +151,9 @@ fn worker(
         .arg(&temp)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = command
         .spawn()
         .map_err(|error| io::Error::other(format!("failed to spawn ffmpeg: {error}")))?;
 
@@ -271,12 +280,37 @@ mod tests {
         out.trim().parse().unwrap()
     }
 
+    fn dimensions(path: &std::path::Path) -> (u32, u32) {
+        let out = std::process::Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width,height",
+                "-of",
+                "default=nw=1:nk=1",
+            ])
+            .arg(path)
+            .output()
+            .unwrap();
+        let out = String::from_utf8_lossy(&out.stdout);
+        let values: Vec<u32> = out
+            .trim()
+            .lines()
+            .map(|line| line.parse().unwrap())
+            .collect();
+
+        (values[0], values[1])
+    }
+
     #[test]
     fn the_video_encodes_n_frames() {
         let dir = dir("frames");
         let output = dir.join("frames.mp4");
 
-        let mut video = Video::new(&output);
+        let mut video = Video::new(&output, 1.0);
 
         for value in 0..3u8 {
             video
@@ -292,8 +326,27 @@ mod tests {
     }
 
     #[test]
+    fn the_video_applies_the_scale_video_filter() {
+        let dir = dir("scale_video");
+        let output = dir.join("scaled.mp4");
+
+        let mut video = Video::new(&output, 0.5);
+
+        for value in 0..3u8 {
+            video
+                .push(32, 24, move || frame(32, 24, value * 30).to_rgba8())
+                .unwrap();
+        }
+
+        assert_eq!(video.finish().unwrap(), 3);
+
+        assert!(output.exists());
+        assert_eq!(dimensions(&output), (16, 12));
+    }
+
+    #[test]
     fn the_video_rejects_odd_dimensions() {
-        let mut video = Video::new(dir("odd").join("odd.mp4"));
+        let mut video = Video::new(dir("odd").join("odd.mp4"), 1.0);
 
         video.push(32, 24, || frame(32, 24, 0).to_rgba8()).unwrap();
 
@@ -309,7 +362,7 @@ mod tests {
     fn the_video_surfaces_a_ffmpeg_failure() {
         let output = dir("missing").join("missing-dir").join("missing.mp4");
 
-        let mut video = Video::new(&output);
+        let mut video = Video::new(&output, 1.0);
 
         for value in 0..3u8 {
             video
@@ -327,7 +380,7 @@ mod tests {
     fn a_still_finishes_with_its_frame_count() {
         let dir = dir("still");
 
-        let mut video = Video::new(dir.join("still.mp4"));
+        let mut video = Video::new(dir.join("still.mp4"), 1.0);
 
         video.push(32, 24, || frame(32, 24, 0).to_rgba8()).unwrap();
 

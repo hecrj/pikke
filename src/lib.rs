@@ -18,6 +18,7 @@ pub mod gradient;
 
 pub use color::Color;
 pub use engine::Engine;
+pub use engine::Settings;
 pub use error::Error;
 pub use gradient::Gradient;
 pub use image::Compression;

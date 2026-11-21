@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use pikke::{Compression, Engine, Error, Result};
+use pikke::{Compression, Engine, Error, Result, Settings};
 
 #[test]
 fn run() -> Result<()> {
@@ -36,8 +36,16 @@ fn run() -> Result<()> {
         };
 
         let output = output_dir.join(format!("{}.png", stem.display()));
-        let result = Engine::load(&script, 1.0)
-            .and_then(|engine| engine.run(&[], Some(&output), Compression::High));
+        let result = Engine::load(&script, 1.0).and_then(|engine| {
+            engine.run(
+                &[],
+                Some(&output),
+                Settings {
+                    compression: Compression::High,
+                    ..Default::default()
+                },
+            )
+        });
 
         match result {
             Ok(()) => println!("{}: ok", name.display()),
@@ -77,7 +85,7 @@ fn the_arguments_bind_json_objects_to_lua_tables() -> Result<()> {
         engine.run(
             &[("layout".to_owned(), layout)],
             Some(&output),
-            Compression::default(),
+            Settings::default(),
         )
     })
 }
@@ -96,7 +104,7 @@ fn the_arguments_reject_non_object_containers() -> Result<()> {
         .run(
             &[("layout".to_owned(), serde_json::Value::Bool(true))],
             Some(&output),
-            Compression::default(),
+            Settings::default(),
         )
         .unwrap_err();
 

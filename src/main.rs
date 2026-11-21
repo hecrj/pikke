@@ -6,7 +6,7 @@ use std::thread;
 
 use notify::Watcher;
 
-use pikke::{Compression, Engine, Error, Result, Scale};
+use pikke::{Compression, Engine, Error, Result, Scale, Settings};
 
 fn main() -> ExitCode {
     match run() {
@@ -101,6 +101,7 @@ fn run() -> Result<()> {
     let mut stdin = false;
     let mut must_watch = false;
     let mut compression = Compression::default();
+    let mut scale_video = 1.0;
     let mut output = None;
     let mut values = BTreeMap::new();
 
@@ -117,6 +118,27 @@ fn run() -> Result<()> {
             }
             "--release" => {
                 compression = Compression::High;
+            }
+            "--scale-video" => {
+                let value = args.next().ok_or_else(|| Error::OptionMissingValue {
+                    option: "--scale-video".to_owned(),
+                })?;
+
+                let value: f32 = value.parse().map_err(|_| Error::OptionInvalidValue {
+                    option: "--scale-video".to_owned(),
+                    value: value.clone(),
+                    note: "not a number".to_owned(),
+                })?;
+
+                if value <= 0.0 || !value.is_finite() {
+                    return Err(Error::OptionInvalidValue {
+                        option: "--scale-video".to_owned(),
+                        value: value.to_string(),
+                        note: "must be a positive number".to_owned(),
+                    });
+                }
+
+                scale_video = value;
             }
             "--scale" => {
                 // Already parsed
@@ -159,9 +181,14 @@ fn run() -> Result<()> {
         return Ok(());
     }
 
+    let settings = Settings {
+        compression,
+        scale_video,
+    };
+
     if stdin {
         let arguments = engine.arguments();
-        return batch(script, scale, arguments, compression, io::stdin());
+        return batch(script, scale, arguments, settings, io::stdin());
     }
 
     let arguments: Vec<_> = engine
@@ -194,10 +221,10 @@ fn run() -> Result<()> {
     );
 
     let output = output.as_deref().map(std::path::Path::new);
-    engine.run(&arguments, output, compression)?;
+    engine.run(&arguments, output, settings)?;
 
     if must_watch {
-        return watch(script, scale, &arguments, output, compression);
+        return watch(script, scale, &arguments, output, settings);
     }
 
     Ok(())
@@ -218,6 +245,7 @@ Options:
   --threads <n>     The worker thread count (default: core count)
   --output <path>   The still's path; the video is the same path as .mp4 (default <script>.png)
   --release         Enable release profile (highest compression settings)
+  --scale-video <s> Scale the video by a factor (default 1)
   --stdin           Read jobs from stdin, one JSON object per line
   --help            Print this help",
     );
@@ -251,7 +279,7 @@ fn batch(
     script: &std::path::Path,
     scale: f32,
     arguments: &[String],
-    compression: Compression,
+    settings: Settings,
     input: impl io::Read + Send,
 ) -> Result<()> {
     use std::cell::OnceCell;
@@ -269,7 +297,7 @@ fn batch(
         script: PathBuf,
         arguments: &[String],
         scale: f32,
-        compression: Compression,
+        settings: Settings,
         job: &str,
     ) -> Result<()> {
         let mut values: serde_json::Map<String, serde_json::Value> = serde_json::from_str(job)?;
@@ -297,7 +325,7 @@ fn batch(
                 .as_ref()
                 .map_err(Error::clone)?;
 
-            engine.run(&arguments, Some(&output), compression)
+            engine.run(&arguments, Some(&output), settings)
         })
     }
 
@@ -328,7 +356,7 @@ fn batch(
         let sender = sender.clone();
 
         rayon::spawn(move || {
-            if let Err(error) = work(script, &arguments, scale, compression, &job) {
+            if let Err(error) = work(script, &arguments, scale, settings, &job) {
                 errors
                     .lock()
                     .expect("lock errors")
@@ -365,7 +393,7 @@ fn watch(
     scale: impl Into<Scale>,
     arguments: &[(String, serde_json::Value)],
     output: Option<&std::path::Path>,
-    compression: Compression,
+    settings: Settings,
 ) -> Result<()> {
     let Some(parent) = script.parent() else {
         return Err(io::Error::other("script has no parent directory").into());
@@ -409,7 +437,7 @@ fn watch(
         println!("[#{i:<04}] -------------------");
 
         let _ = Engine::load(script, scale)
-            .and_then(|engine| engine.run(arguments, output, compression))
+            .and_then(|engine| engine.run(arguments, output, settings))
             .inspect_err(|error| eprintln!("error running {}: {error}", script.display()));
     }
 }
