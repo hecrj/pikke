@@ -36,16 +36,14 @@ fn run() -> Result<()> {
         };
 
         let output = output_dir.join(format!("{}.png", stem.display()));
-        let result = Engine::load(&script, 1.0).and_then(|engine| {
-            engine.run(
-                &[],
-                Some(&output),
-                Settings {
-                    compression: Compression::High,
-                    ..Default::default()
-                },
-            )
-        });
+        let result = Engine::load(
+            &script,
+            Settings {
+                compression: Compression::High,
+                ..Settings::default()
+            },
+        )
+        .and_then(|engine| engine.run(&[], Some(&output)));
 
         match result {
             Ok(()) => println!("{}: ok", name.display()),
@@ -81,13 +79,8 @@ fn the_arguments_bind_json_objects_to_lua_tables() -> Result<()> {
         "size": { "width": 8, "label": "small" }
     });
 
-    Engine::load(&script, 1.0).and_then(|engine| {
-        engine.run(
-            &[("layout".to_owned(), layout)],
-            Some(&output),
-            Settings::default(),
-        )
-    })
+    Engine::load(&script, Settings::default())
+        .and_then(|engine| engine.run(&[("layout".to_owned(), layout)], Some(&output)))
 }
 
 #[test]
@@ -98,13 +91,12 @@ fn the_arguments_reject_non_object_containers() -> Result<()> {
     fs::create_dir_all(&output_dir)?;
     let output = output_dir.join("arguments.png");
 
-    let engine = Engine::load(&script, 1.0)?;
+    let engine = Engine::load(&script, Settings::default())?;
 
     let error = engine
         .run(
             &[("layout".to_owned(), serde_json::Value::Bool(true))],
             Some(&output),
-            Settings::default(),
         )
         .unwrap_err();
 

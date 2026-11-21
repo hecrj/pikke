@@ -29,6 +29,7 @@ impl Stream {
         args: Vec<String>,
         width: f32,
         height: f32,
+        framerate: u32,
         scale: Scale,
         space: color::Space,
         alpha: color::Alpha,
@@ -41,7 +42,10 @@ impl Stream {
             .arg("--width")
             .arg(viewport.width().to_string())
             .arg("--height")
-            .arg(viewport.height().to_string());
+            .arg(viewport.height().to_string())
+            .arg("--framerate")
+            .arg(framerate.to_string());
+
         command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -211,7 +215,7 @@ fn drain_stderr(mut stderr: ChildStderr) -> (mpsc::Receiver<Vec<u8>>, JoinHandle
     (rx, drain)
 }
 
-pub fn install(lua: &Lua, env: &Table, scale: Scale) -> Result<()> {
+pub fn install(lua: &Lua, env: &Table, scale: Scale, framerate: u32) -> Result<()> {
     env.set(
         "stream",
         lua.create_function(
@@ -253,8 +257,17 @@ pub fn install(lua: &Lua, env: &Table, scale: Scale) -> Result<()> {
 
                 let argv = argv(opts)?;
 
-                Stream::spawn(program, argv, width, height, scale, color_space, alpha)
-                    .map_err(|error| mlua::Error::RuntimeError(error.to_string()))
+                Stream::spawn(
+                    program,
+                    argv,
+                    width,
+                    height,
+                    framerate,
+                    scale,
+                    color_space,
+                    alpha,
+                )
+                .map_err(|error| mlua::Error::RuntimeError(error.to_string()))
             },
         )?,
     )?;

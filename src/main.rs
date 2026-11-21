@@ -36,6 +36,9 @@ fn run() -> Result<()> {
 
     let mut scale = 1.0;
     let mut threads = None;
+    let mut compression = Compression::default();
+    let mut scale_video = 1.0;
+    let mut framerate = 60;
 
     {
         let mut args = std::env::args();
@@ -63,6 +66,40 @@ fn run() -> Result<()> {
 
                     scale = value;
                 }
+                "--scale-video" => {
+                    let value = args.next().ok_or_else(|| Error::OptionMissingValue {
+                        option: "--scale-video".to_owned(),
+                    })?;
+
+                    let value: f32 = value.parse().map_err(|_| Error::OptionInvalidValue {
+                        option: "--scale-video".to_owned(),
+                        value: value.clone(),
+                        note: "not a number".to_owned(),
+                    })?;
+
+                    if value <= 0.0 || !value.is_finite() {
+                        return Err(Error::OptionInvalidValue {
+                            option: "--scale-video".to_owned(),
+                            value: value.to_string(),
+                            note: "must be a positive number".to_owned(),
+                        });
+                    }
+
+                    scale_video = value;
+                }
+                "--framerate" => {
+                    let value = args.next().ok_or_else(|| Error::OptionMissingValue {
+                        option: "--framerate".to_owned(),
+                    })?;
+
+                    let value: u32 = value.parse().map_err(|_| Error::OptionInvalidValue {
+                        option: "--framerate".to_owned(),
+                        value: value.clone(),
+                        note: "not a number".to_owned(),
+                    })?;
+
+                    framerate = value;
+                }
                 "--threads" => {
                     let value = args.next().ok_or_else(|| Error::OptionMissingValue {
                         option: "--threads".to_owned(),
@@ -78,6 +115,9 @@ fn run() -> Result<()> {
                                     note: "must be a valid positive integer".to_owned(),
                                 })?,
                         );
+                }
+                "--release" => {
+                    compression = Compression::High;
                 }
                 _ => {}
             }
@@ -95,14 +135,18 @@ fn run() -> Result<()> {
             .expect("build global thread pool")
     }
 
-    let engine = Engine::load(script, scale)?;
+    let settings = Settings {
+        scale: Scale::from(scale),
+        compression,
+        scale_video,
+        framerate,
+    };
+
+    let engine = Engine::load(script, settings)?;
 
     let mut show_help = false;
     let mut stdin = false;
     let mut must_watch = false;
-    let mut compression = Compression::default();
-    let mut scale_video = 1.0;
-    let mut framerate = 60.0;
     let mut output = None;
     let mut values = BTreeMap::new();
 
@@ -117,58 +161,12 @@ fn run() -> Result<()> {
             "--watch" => {
                 must_watch = true;
             }
+            "--scale" | "--scale-video" | "--framerate" | "--threads" => {
+                // Already parsed
+                let _ = args.next();
+            }
             "--release" => {
-                compression = Compression::High;
-            }
-            "--scale-video" => {
-                let value = args.next().ok_or_else(|| Error::OptionMissingValue {
-                    option: "--scale-video".to_owned(),
-                })?;
-
-                let value: f32 = value.parse().map_err(|_| Error::OptionInvalidValue {
-                    option: "--scale-video".to_owned(),
-                    value: value.clone(),
-                    note: "not a number".to_owned(),
-                })?;
-
-                if value <= 0.0 || !value.is_finite() {
-                    return Err(Error::OptionInvalidValue {
-                        option: "--scale-video".to_owned(),
-                        value: value.to_string(),
-                        note: "must be a positive number".to_owned(),
-                    });
-                }
-
-                scale_video = value;
-            }
-            "--framerate" => {
-                let value = args.next().ok_or_else(|| Error::OptionMissingValue {
-                    option: "--framerate".to_owned(),
-                })?;
-
-                let value: f32 = value.parse().map_err(|_| Error::OptionInvalidValue {
-                    option: "--framerate".to_owned(),
-                    value: value.clone(),
-                    note: "not a number".to_owned(),
-                })?;
-
-                if value <= 0.0 || !value.is_finite() {
-                    return Err(Error::OptionInvalidValue {
-                        option: "--framerate".to_owned(),
-                        value: value.to_string(),
-                        note: "must be a positive number".to_owned(),
-                    });
-                }
-
-                framerate = value;
-            }
-            "--scale" => {
                 // Already parsed
-                let _ = args.next();
-            }
-            "--threads" => {
-                // Already parsed
-                let _ = args.next();
             }
             "--output" => {
                 output = Some(args.next().ok_or_else(|| Error::OptionMissingValue {
@@ -203,15 +201,9 @@ fn run() -> Result<()> {
         return Ok(());
     }
 
-    let settings = Settings {
-        compression,
-        scale_video,
-        framerate,
-    };
-
     if stdin {
         let arguments = engine.arguments();
-        return batch(script, scale, arguments, settings, io::stdin());
+        return batch(script, arguments, settings, io::stdin());
     }
 
     let arguments: Vec<_> = engine
@@ -244,10 +236,10 @@ fn run() -> Result<()> {
     );
 
     let output = output.as_deref().map(std::path::Path::new);
-    engine.run(&arguments, output, settings)?;
+    engine.run(&arguments, output)?;
 
     if must_watch {
-        return watch(script, scale, &arguments, output, settings);
+        return watch(script, &arguments, output, settings);
     }
 
     Ok(())
@@ -301,7 +293,6 @@ Options:
 
 fn batch(
     script: &std::path::Path,
-    scale: f32,
     arguments: &[String],
     settings: Settings,
     input: impl io::Read + Send,
@@ -317,13 +308,7 @@ fn batch(
         static ENGINE: OnceCell<Result<Engine>> = const { OnceCell::new() };
     }
 
-    fn work(
-        script: PathBuf,
-        arguments: &[String],
-        scale: f32,
-        settings: Settings,
-        job: &str,
-    ) -> Result<()> {
+    fn work(script: PathBuf, arguments: &[String], settings: Settings, job: &str) -> Result<()> {
         let mut values: serde_json::Map<String, serde_json::Value> = serde_json::from_str(job)?;
 
         for key in values.keys() {
@@ -345,11 +330,11 @@ fn batch(
 
         ENGINE.with(|cell| {
             let engine = cell
-                .get_or_init(|| Engine::load(script, scale))
+                .get_or_init(|| Engine::load(script, settings))
                 .as_ref()
                 .map_err(Error::clone)?;
 
-            engine.run(&arguments, Some(&output), settings)
+            engine.run(&arguments, Some(&output))
         })
     }
 
@@ -380,7 +365,7 @@ fn batch(
         let sender = sender.clone();
 
         rayon::spawn(move || {
-            if let Err(error) = work(script, &arguments, scale, settings, &job) {
+            if let Err(error) = work(script, &arguments, settings, &job) {
                 errors
                     .lock()
                     .expect("lock errors")
@@ -414,7 +399,6 @@ fn batch(
 
 fn watch(
     script: &std::path::Path,
-    scale: impl Into<Scale>,
     arguments: &[(String, serde_json::Value)],
     output: Option<&std::path::Path>,
     settings: Settings,
@@ -427,7 +411,6 @@ fn watch(
     let mut watcher = notify::recommended_watcher(sender)?;
     watcher.watch(parent, notify::RecursiveMode::Recursive)?;
 
-    let scale = scale.into();
     let mut i = 0;
 
     loop {
@@ -460,8 +443,8 @@ fn watch(
 
         println!("[#{i:<04}] -------------------");
 
-        let _ = Engine::load(script, scale)
-            .and_then(|engine| engine.run(arguments, output, settings))
+        let _ = Engine::load(script, settings)
+            .and_then(|engine| engine.run(arguments, output))
             .inspect_err(|error| eprintln!("error running {}: {error}", script.display()));
     }
 }

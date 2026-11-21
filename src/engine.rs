@@ -11,16 +11,18 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Settings {
     pub compression: Compression,
+    pub scale: Scale,
     pub scale_video: f32,
-    pub framerate: f32,
+    pub framerate: u32,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             compression: Compression::default(),
+            scale: Scale::default(),
             scale_video: 1.0,
-            framerate: 60.0,
+            framerate: 60,
         }
     }
 }
@@ -31,12 +33,12 @@ pub struct Engine {
     render: Function,
     arguments: Vec<String>,
     env: Table,
+    settings: Settings,
 }
 
 impl Engine {
-    pub fn load(script: impl AsRef<Path>, scale: impl Into<Scale>) -> Result<Engine> {
+    pub fn load(script: impl AsRef<Path>, settings: Settings) -> Result<Engine> {
         let script = script.as_ref().to_path_buf();
-        let scale = scale.into();
 
         let source = std::fs::read_to_string(&script).map_err(|error| Error::ReadFailed {
             script: script.clone(),
@@ -45,7 +47,7 @@ impl Engine {
 
         let lua = Lua::new();
         let env = lua.globals();
-        env.set("scale", f32::from(scale))?;
+        env.set("scale", f32::from(settings.scale))?;
 
         let script_dir = script
             .parent()
@@ -55,12 +57,12 @@ impl Engine {
         point::install(&lua, &env)?;
         color::install(&lua, &env)?;
         gradient::install(&lua, &env)?;
-        image::install(&lua, &env, scale)?;
+        image::install(&lua, &env, settings.scale)?;
         font::install(&lua, &env)?;
         rectangle::install(&lua, &env)?;
         path::install(&lua, &env)?;
-        text::install(&lua, &env, scale)?;
-        stream::install(&lua, &env, scale)?;
+        text::install(&lua, &env, settings.scale)?;
+        stream::install(&lua, &env, settings.scale, settings.framerate)?;
 
         let package: Table = env.get("package")?;
         let existing: String = package.get("path")?;
@@ -93,6 +95,7 @@ impl Engine {
             render,
             arguments,
             env,
+            settings,
         })
     }
 
@@ -104,13 +107,9 @@ impl Engine {
         &self.arguments
     }
 
-    pub fn run(
-        &self,
-        params: &[(String, serde_json::Value)],
-        output: Option<&Path>,
-        settings: Settings,
-    ) -> Result<()> {
+    pub fn run(&self, params: &[(String, serde_json::Value)], output: Option<&Path>) -> Result<()> {
         let script = self.script.clone();
+        let settings = self.settings;
 
         let output = output
             .map(Path::to_path_buf)
