@@ -13,6 +13,7 @@ const STDERR_TAIL: usize = 1 << 20;
 pub struct Video {
     output: PathBuf,
     scale: f32,
+    framerate: f32,
     frames: usize,
     state: State,
 }
@@ -33,10 +34,11 @@ enum State {
 }
 
 impl Video {
-    pub fn new(path: impl AsRef<Path>, scale: f32) -> Self {
+    pub fn new(path: impl AsRef<Path>, scale: f32, framerate: f32) -> Self {
         Self {
             output: path.as_ref().to_path_buf(),
             scale,
+            framerate,
             frames: 0,
             state: State::Empty,
         }
@@ -65,7 +67,10 @@ impl Video {
 
                 let output = self.output.clone();
                 let scale = self.scale;
-                let handle = thread::spawn(move || worker(output, width, height, scale, receiver));
+                let framerate = self.framerate;
+                let handle = thread::spawn(move || {
+                    worker(output, width, height, scale, framerate, receiver)
+                });
 
                 sender.send(Some(first)).map_err(io::Error::other)?;
                 sender
@@ -105,6 +110,7 @@ fn worker(
     width: u16,
     height: u16,
     scale: f32,
+    framerate: f32,
     receiver: mpsc::Receiver<Option<ToRgba>>,
 ) -> Result<()> {
     let file_name = output
@@ -122,7 +128,9 @@ fn worker(
     let mut command = Command::new("ffmpeg");
     command.args(["-f", "rawvideo", "-pix_fmt", "rgba", "-s"]);
     command.arg(format!("{width}x{height}"));
-    command.args(["-framerate", "60", "-i", "-"]);
+    command.arg("-framerate");
+    command.arg(framerate.to_string());
+    command.args(["-i", "-"]);
 
     if scale != 1.0 {
         command.args(["-vf", &format!("scale=iw*{scale}:-1:flags=lanczos")]);
@@ -310,7 +318,7 @@ mod tests {
         let dir = dir("frames");
         let output = dir.join("frames.mp4");
 
-        let mut video = Video::new(&output, 1.0);
+        let mut video = Video::new(&output, 1.0, 60.0);
 
         for value in 0..3u8 {
             video
@@ -330,7 +338,7 @@ mod tests {
         let dir = dir("scale_video");
         let output = dir.join("scaled.mp4");
 
-        let mut video = Video::new(&output, 0.5);
+        let mut video = Video::new(&output, 0.5, 60.0);
 
         for value in 0..3u8 {
             video
@@ -346,7 +354,7 @@ mod tests {
 
     #[test]
     fn the_video_rejects_odd_dimensions() {
-        let mut video = Video::new(dir("odd").join("odd.mp4"), 1.0);
+        let mut video = Video::new(dir("odd").join("odd.mp4"), 1.0, 60.0);
 
         video.push(32, 24, || frame(32, 24, 0).to_rgba8()).unwrap();
 
@@ -362,7 +370,7 @@ mod tests {
     fn the_video_surfaces_a_ffmpeg_failure() {
         let output = dir("missing").join("missing-dir").join("missing.mp4");
 
-        let mut video = Video::new(&output, 1.0);
+        let mut video = Video::new(&output, 1.0, 60.0);
 
         for value in 0..3u8 {
             video
@@ -380,7 +388,7 @@ mod tests {
     fn a_still_finishes_with_its_frame_count() {
         let dir = dir("still");
 
-        let mut video = Video::new(dir.join("still.mp4"), 1.0);
+        let mut video = Video::new(dir.join("still.mp4"), 1.0, 60.0);
 
         video.push(32, 24, || frame(32, 24, 0).to_rgba8()).unwrap();
 

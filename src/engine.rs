@@ -12,6 +12,7 @@ use crate::{
 pub struct Settings {
     pub compression: Compression,
     pub scale_video: f32,
+    pub framerate: f32,
 }
 
 impl Default for Settings {
@@ -19,6 +20,7 @@ impl Default for Settings {
         Self {
             compression: Compression::default(),
             scale_video: 1.0,
+            framerate: 60.0,
         }
     }
 }
@@ -123,7 +125,7 @@ impl Engine {
         let mut run = None;
 
         self.lua
-            .set_app_data(Video::new(&video, settings.scale_video));
+            .set_app_data(Video::new(&video, settings.scale_video, settings.framerate));
 
         self.env.set(
             "yield",

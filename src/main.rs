@@ -102,6 +102,7 @@ fn run() -> Result<()> {
     let mut must_watch = false;
     let mut compression = Compression::default();
     let mut scale_video = 1.0;
+    let mut framerate = 60.0;
     let mut output = None;
     let mut values = BTreeMap::new();
 
@@ -139,6 +140,27 @@ fn run() -> Result<()> {
                 }
 
                 scale_video = value;
+            }
+            "--framerate" => {
+                let value = args.next().ok_or_else(|| Error::OptionMissingValue {
+                    option: "--framerate".to_owned(),
+                })?;
+
+                let value: f32 = value.parse().map_err(|_| Error::OptionInvalidValue {
+                    option: "--framerate".to_owned(),
+                    value: value.clone(),
+                    note: "not a number".to_owned(),
+                })?;
+
+                if value <= 0.0 || !value.is_finite() {
+                    return Err(Error::OptionInvalidValue {
+                        option: "--framerate".to_owned(),
+                        value: value.to_string(),
+                        note: "must be a positive number".to_owned(),
+                    });
+                }
+
+                framerate = value;
             }
             "--scale" => {
                 // Already parsed
@@ -184,6 +206,7 @@ fn run() -> Result<()> {
     let settings = Settings {
         compression,
         scale_video,
+        framerate,
     };
 
     if stdin {
@@ -246,6 +269,7 @@ Options:
   --output <path>   The still's path; the video is the same path as .mp4 (default <script>.png)
   --release         Enable release profile (highest compression settings)
   --scale-video <s> Scale the video by a factor (default 1)
+  --framerate <n>   The video's framerate (default 60)
   --stdin           Read jobs from stdin, one JSON object per line
   --help            Print this help",
     );
