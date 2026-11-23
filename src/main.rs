@@ -119,6 +119,9 @@ fn run() -> Result<()> {
                 "--release" => {
                     compression = Compression::High;
                 }
+                "--fast" => {
+                    compression = Compression::Fast;
+                }
                 _ => {}
             }
         }
@@ -165,7 +168,7 @@ fn run() -> Result<()> {
                 // Already parsed
                 let _ = args.next();
             }
-            "--release" => {
+            "--release" | "--fast" => {
                 // Already parsed
             }
             "--output" => {
@@ -260,6 +263,7 @@ Options:
   --threads <n>     The worker thread count (default: core count)
   --output <path>   The still's path; the video is the same path as .mp4 (default <script>.png)
   --release         Enable release profile (highest compression settings)
+  --fast            Enable fast profile (fast compression settings)
   --scale-video <s> Scale the video by a factor (default 1)
   --framerate <n>   The video's framerate (default 60)
   --stdin           Read jobs from stdin, one JSON object per line

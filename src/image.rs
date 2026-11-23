@@ -76,6 +76,7 @@ pub enum AlignY {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Compression {
+    Fast,
     #[default]
     Balanced,
     High,
@@ -1148,7 +1149,8 @@ impl<Space: 'static> Image<Space> {
 
         let rgba8 = self.to_rgba8();
         let compression = match compression {
-            Compression::Balanced => png::Compression::default(),
+            Compression::Fast => png::Compression::Fast,
+            Compression::Balanced => png::Compression::Balanced,
             Compression::High => png::Compression::High,
         };
 
