@@ -170,7 +170,7 @@ impl Engine {
         let args = self.lua.create_table()?;
 
         for (name, value) in params {
-            let value = lua_value(&self.lua, name.as_str(), value)?;
+            let value = lua_value(&self.lua, value)?;
 
             args.set(name.as_str(), value)?;
         }
@@ -201,9 +201,10 @@ fn default_output(script: &Path) -> PathBuf {
         .unwrap_or(PathBuf::from("output.png"))
 }
 
-fn lua_value(lua: &Lua, option: &str, value: &serde_json::Value) -> Result<Value> {
+fn lua_value(lua: &Lua, value: &serde_json::Value) -> Result<Value> {
     Ok(match value {
         serde_json::Value::Null => Value::Nil,
+        serde_json::Value::Bool(value) => value.into_lua(lua)?,
         serde_json::Value::String(value) => value.as_str().into_lua(lua)?,
         serde_json::Value::Number(number) => {
             if let Some(integer) = number.as_i64() {
@@ -219,7 +220,7 @@ fn lua_value(lua: &Lua, option: &str, value: &serde_json::Value) -> Result<Value
             let table = lua.create_table()?;
 
             for (key, value) in object {
-                table.set(key.as_str(), lua_value(lua, option, value)?)?;
+                table.set(key.as_str(), lua_value(lua, value)?)?;
             }
 
             Value::Table(table)
@@ -228,17 +229,10 @@ fn lua_value(lua: &Lua, option: &str, value: &serde_json::Value) -> Result<Value
             let table = lua.create_table()?;
 
             for value in array {
-                table.push(lua_value(lua, option, value)?)?;
+                table.push(lua_value(lua, value)?)?;
             }
 
             Value::Table(table)
-        }
-        value => {
-            return Err(Error::OptionInvalidValue {
-                option: option.to_owned(),
-                value: value.to_string(),
-                note: "must be a string, number, null, or object".to_owned(),
-            });
         }
     })
 }
