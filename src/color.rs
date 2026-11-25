@@ -799,6 +799,13 @@ impl<Space: 'static> Buffer<Space> {
         self.a = crop(&self.a, box_w, left, top, target_w, target_h);
     }
 
+    pub fn rotate(&mut self, width: u16, height: u16, angle: i32) {
+        self.r = rotate(&self.r, width, height, angle);
+        self.g = rotate(&self.g, width, height, angle);
+        self.b = rotate(&self.b, width, height, angle);
+        self.a = rotate(&self.a, width, height, angle);
+    }
+
     pub fn clamp_alpha(&mut self) {
         for value in self.a.iter_mut() {
             *value = value.clamp(0.0, 1.0);
@@ -1660,6 +1667,41 @@ pub fn crop(src: &[f32], src_w: u16, left: u16, top: u16, out_w: u16, out_h: u16
         out[y * ow..(y + 1) * ow].copy_from_slice(&src[row..row + ow]);
     }
     out
+}
+
+pub fn rotate(src: &[f32], width: u16, height: u16, angle: i32) -> Vec<f32> {
+    if src.is_empty() {
+        return src.to_vec();
+    }
+
+    let (width, height) = (width as usize, height as usize);
+
+    match angle.rem_euclid(360) {
+        90 => {
+            let mut out = vec![0.0f32; src.len()];
+
+            for (y, row) in out.chunks_mut(height).enumerate() {
+                for (x, slot) in row.iter_mut().enumerate() {
+                    *slot = src[(height - 1 - x) * width + y];
+                }
+            }
+
+            out
+        }
+        180 => src.iter().rev().copied().collect(),
+        270 => {
+            let mut out = vec![0.0f32; src.len()];
+
+            for (y, row) in out.chunks_mut(height).enumerate() {
+                for (x, slot) in row.iter_mut().enumerate() {
+                    *slot = src[x * width + width - 1 - y];
+                }
+            }
+
+            out
+        }
+        _ => src.to_vec(),
+    }
 }
 
 #[cfg(test)]

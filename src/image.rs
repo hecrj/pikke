@@ -212,6 +212,23 @@ impl<Space: 'static> Image<Space> {
         Ok(())
     }
 
+    pub fn rotate(&mut self, angle: i32) {
+        let angle = angle.rem_euclid(360);
+
+        if angle == 0 {
+            return;
+        }
+
+        let (width, height) = (self.viewport.width(), self.viewport.height());
+        let buffer = Arc::make_mut(&mut self.buffer);
+
+        buffer.rotate(width, height, angle);
+
+        if angle == 90 || angle == 270 {
+            self.viewport = self.viewport.rotated();
+        }
+    }
+
     pub fn recolor(&mut self, color: Color)
     where
         color::Linear: color::ToSpace<Space>,
@@ -1256,6 +1273,13 @@ impl Reference {
         self.replace(move |source| source.blur(radius));
     }
 
+    fn rotate(&mut self, angle: i32) {
+        self.replace(move |source| {
+            source.rotate(angle);
+            Ok(())
+        });
+    }
+
     fn recolor(&mut self, color: Color) {
         self.replace(move |source| {
             source.recolor(color);
@@ -1532,6 +1556,13 @@ impl Value {
         }
     }
 
+    pub fn rotate(&mut self, angle: i32) {
+        match self {
+            Value::Linear(image) => image.rotate(angle),
+            Value::Srgb(image) => image.rotate(angle),
+        }
+    }
+
     pub fn recolor(&mut self, color: Color) {
         match self {
             Value::Linear(image) => {
@@ -1764,6 +1795,16 @@ impl UserData for Reference {
             }
 
             this.blur(radius);
+            Ok(())
+        });
+        methods.add_method_mut("rotate", |_lua, this, angle: f32| -> mlua::Result<()> {
+            if !angle.is_finite() || angle % 90.0 != 0.0 {
+                return Err(mlua::Error::RuntimeError(
+                    "rotate: 'angle' must be a multiple of 90".to_owned(),
+                ));
+            }
+
+            this.rotate(angle.rem_euclid(360.0) as i32);
             Ok(())
         });
         methods.add_method_mut(

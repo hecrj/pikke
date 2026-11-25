@@ -56,6 +56,16 @@ impl Viewport {
         })
     }
 
+    pub fn rotated(self) -> Self {
+        Self {
+            width: self.height,
+            height: self.width,
+            logical_width: self.logical_height,
+            logical_height: self.logical_width,
+            scale: self.scale,
+        }
+    }
+
     pub fn width(&self) -> u16 {
         self.width
     }
