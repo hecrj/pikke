@@ -1248,6 +1248,10 @@ impl UserData for Oklch {
                 Ok(this.with_alpha(alpha))
             },
         );
+
+        methods.add_method("clone", |_lua, this, _args: ()| -> mlua::Result<Self> {
+            Ok(*this)
+        });
     }
 }
 
