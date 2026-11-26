@@ -404,7 +404,12 @@ fn batch(
     } else {
         indicatif::ProgressBar::hidden()
     }
-    .with_style(indicatif::ProgressStyle::with_template("{msg} {wide_bar} {pos}/{len}").unwrap())
+    .with_style(
+        indicatif::ProgressStyle::with_template(
+            "{msg} {wide_bar} {pos}/{len} ({elapsed}/{duration})",
+        )
+        .unwrap(),
+    )
     .with_message(
         script
             .file_stem()
@@ -445,8 +450,10 @@ fn batch(
             indicatif::ProgressBar::hidden()
         }
         .with_style(
-            indicatif::ProgressStyle::with_template("{spinner} {wide_msg}: {human_pos} frame(s)")
-                .unwrap(),
+            indicatif::ProgressStyle::with_template(
+                "{spinner} {wide_msg}: {human_pos} frame(s) ({elapsed})",
+            )
+            .unwrap(),
         );
 
         rayon::spawn(move || {
