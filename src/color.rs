@@ -445,6 +445,13 @@ pub fn install(lua: &Lua, env: &Table) -> crate::Result<()> {
         )?,
     )?;
 
+    env.set(
+        "color",
+        lua.create_function(|_lua, value: Value| -> mlua::Result<Color> {
+            lua::color("color", &value)
+        })?,
+    )?;
+
     Ok(())
 }
 

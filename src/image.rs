@@ -1958,7 +1958,8 @@ pub fn install(lua: &Lua, env: &Table, scale: Scale) -> Result<()> {
         lua.create_function(move |_lua, opts: Table| -> mlua::Result<Reference> {
             let width: Option<f32> = opts.get("width")?;
             let height: Option<f32> = opts.get("height")?;
-            let color: Option<String> = opts.get("color")?;
+
+            let color: Option<mlua::Value> = opts.get("color")?;
 
             let width = width
                 .ok_or_else(|| mlua::Error::RuntimeError("blank: needs 'width'".to_owned()))?;
@@ -1978,7 +1979,7 @@ pub fn install(lua: &Lua, env: &Table, scale: Scale) -> Result<()> {
             }
 
             let paint = if let Some(color) = color {
-                lua::hex("blank", &color)?
+                lua::color("blank", &color)?
             } else {
                 Color::TRANSPARENT
             };
