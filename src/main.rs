@@ -168,6 +168,7 @@ fn run() -> Result<()> {
 
     let mut show_help = false;
     let mut stdin = false;
+    let mut stream = false;
     let mut must_watch = false;
     let mut output = None;
     let mut values = BTreeMap::new();
@@ -179,6 +180,10 @@ fn run() -> Result<()> {
             }
             "--stdin" => {
                 stdin = true;
+            }
+            "--stream" => {
+                stdin = true;
+                stream = true;
             }
             "--watch" => {
                 must_watch = true;
@@ -225,7 +230,7 @@ fn run() -> Result<()> {
 
     if stdin {
         let arguments = engine.arguments();
-        return batch(script, arguments, settings, io::stdin());
+        return batch(script, arguments, settings, stream, verbose, io::stdin());
     }
 
     let arguments: Vec<_> = engine
@@ -258,7 +263,7 @@ fn run() -> Result<()> {
     );
 
     let output = output.as_deref().map(std::path::Path::new);
-    engine.run(&arguments, output)?;
+    engine.run(&arguments, output, None)?;
 
     if must_watch {
         return watch(script, &arguments, output, settings);
@@ -319,7 +324,9 @@ fn batch(
     script: &std::path::Path,
     arguments: &[String],
     settings: Settings,
-    input: impl io::Read + Send,
+    stream: bool,
+    verbose: bool,
+    mut input: impl io::Read + Send,
 ) -> Result<()> {
     use std::cell::OnceCell;
     use std::io::BufRead;
@@ -332,7 +339,13 @@ fn batch(
         static ENGINE: OnceCell<Result<Engine>> = const { OnceCell::new() };
     }
 
-    fn work(script: PathBuf, arguments: &[String], settings: Settings, job: &str) -> Result<()> {
+    fn work(
+        script: PathBuf,
+        arguments: &[String],
+        settings: Settings,
+        job: &str,
+        progress: indicatif::ProgressBar,
+    ) -> Result<()> {
         let mut values: serde_json::Map<String, serde_json::Value> = serde_json::from_str(job)?;
 
         for key in values.keys() {
@@ -358,11 +371,48 @@ fn batch(
                 .as_ref()
                 .map_err(Error::clone)?;
 
-            engine.run(&arguments, Some(&output))
+            engine.run(&arguments, Some(&output), Some(progress))
         })
     }
 
-    let reader = io::BufReader::new(input);
+    let (reader, total) = if stream {
+        (
+            Box::new(io::BufReader::new(input)) as Box<dyn io::BufRead>,
+            None,
+        )
+    } else {
+        let mut batch = String::new();
+        input.read_to_string(&mut batch)?;
+
+        let total = batch.lines().count() as u64;
+
+        (Box::new(io::Cursor::new(batch)) as _, Some(total))
+    };
+
+    if total == Some(0) {
+        return Ok(());
+    }
+
+    let bars = (!verbose).then(indicatif::MultiProgress::new);
+
+    let total_progress = if let Some(bars) = &bars {
+        bars.add(
+            total
+                .map(indicatif::ProgressBar::new)
+                .unwrap_or_else(indicatif::ProgressBar::no_length),
+        )
+    } else {
+        indicatif::ProgressBar::hidden()
+    }
+    .with_style(indicatif::ProgressStyle::with_template("{msg} {wide_bar} {pos}/{len}").unwrap())
+    .with_message(
+        script
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned(),
+    );
+
     let mut lines = reader.lines();
     let arguments: Arc<[String]> = Arc::from(arguments);
     let errors = Arc::new(Mutex::new(Vec::new()));
@@ -387,9 +437,20 @@ fn batch(
         let arguments = arguments.clone();
         let errors = errors.clone();
         let sender = sender.clone();
+        let total_progress = total_progress.clone();
+
+        let progress = if let Some(bars) = &bars {
+            bars.insert_from_back(1, indicatif::ProgressBar::no_length())
+        } else {
+            indicatif::ProgressBar::hidden()
+        }
+        .with_style(
+            indicatif::ProgressStyle::with_template("{spinner} {wide_msg}: {human_pos} frame(s)")
+                .unwrap(),
+        );
 
         rayon::spawn(move || {
-            if let Err(error) = work(script, &arguments, settings, &job) {
+            if let Err(error) = work(script, &arguments, settings, &job, progress) {
                 errors
                     .lock()
                     .expect("lock errors")
@@ -397,12 +458,15 @@ fn batch(
             }
 
             let _ = sender.send(());
+            total_progress.inc(1);
         });
     }
 
     for _ in 0..max_in_flight {
         let _ = permits.recv();
     }
+
+    total_progress.finish();
 
     let mut errors = errors.lock().expect("lock errors");
 
@@ -468,7 +532,7 @@ fn watch(
         println!("[#{i:<04}] -------------------");
 
         let _ = Engine::load(script, settings)
-            .and_then(|engine| engine.run(arguments, output))
+            .and_then(|engine| engine.run(arguments, output, None))
             .inspect_err(|error| eprintln!("error running {}: {error}", script.display()));
     }
 }

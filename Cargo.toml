@@ -8,6 +8,7 @@ description = "A modern, Lua-driven image and video compositing engine"
 multithreading = []
 
 [dependencies]
+indicatif = "0.18"
 log = "0.4"
 notify = "8"
 png = "0.18"

@@ -43,7 +43,7 @@ fn run() -> Result<()> {
                 ..Settings::default()
             },
         )
-        .and_then(|engine| engine.run(&[], Some(&output)));
+        .and_then(|engine| engine.run(&[], Some(&output), None));
 
         match result {
             Ok(()) => println!("{}: ok", name.display()),
@@ -80,5 +80,5 @@ fn the_arguments_bind_json_objects_to_lua_tables() -> Result<()> {
     });
 
     Engine::load(&script, Settings::default())
-        .and_then(|engine| engine.run(&[("layout".to_owned(), layout)], Some(&output)))
+        .and_then(|engine| engine.run(&[("layout".to_owned(), layout)], Some(&output), None))
 }

@@ -107,7 +107,12 @@ impl Engine {
         &self.arguments
     }
 
-    pub fn run(&self, params: &[(String, serde_json::Value)], output: Option<&Path>) -> Result<()> {
+    pub fn run(
+        &self,
+        params: &[(String, serde_json::Value)],
+        output: Option<&Path>,
+        progress: Option<indicatif::ProgressBar>,
+    ) -> Result<()> {
         let script = self.script.clone();
         let settings = self.settings;
 
@@ -123,14 +128,24 @@ impl Engine {
         let mut number = 0;
         let mut run = None;
 
+        if let Some((progress, file_stem)) = progress.as_ref().zip(output.file_stem()) {
+            progress.set_message(file_stem.to_string_lossy().into_owned());
+        }
+
         self.lua
             .set_app_data(Video::new(&video, settings.scale_video, settings.framerate));
+
+        let yield_progress = progress.clone();
 
         self.env.set(
             "yield",
             self.lua
                 .create_function_mut(move |lua, frame: AnyUserData| -> mlua::Result<()> {
                     number += 1;
+
+                    if let Some(progress) = &yield_progress {
+                        progress.inc(1);
+                    }
 
                     let frame = frame.borrow::<image::Reference>()?;
                     let image = frame.image()?;
@@ -185,6 +200,10 @@ impl Engine {
 
         if frames > 1 {
             log::info!("output: {} ({frames} frames)", video.display());
+        }
+
+        if let Some(progress) = progress {
+            progress.finish();
         }
 
         self.lua.gc_collect()?;

@@ -46,7 +46,7 @@ fn lua_scripts(criterion: &mut Criterion) {
         group.bench_function(stem.to_string_lossy().into_owned(), move |benchmark| {
             benchmark.iter(|| {
                 engine
-                    .run(&[], Some(&output))
+                    .run(&[], Some(&output), None)
                     .expect("the benchmark script failed")
             });
         });
