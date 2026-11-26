@@ -147,13 +147,13 @@ impl Engine {
                         )));
                     }
 
-                    eprintln!("yield: frame {number} ({width}×{height})",);
+                    log::trace!("yield: frame {number} ({width}×{height})",);
 
                     if number == 1 {
                         run = Some((width, height));
                         image.write(&output, settings.compression)?;
 
-                        eprintln!("output: {} ({width}×{height})", output.display(),);
+                        log::info!("output: {} ({width}×{height})", output.display(),);
                     }
 
                     lua.app_data_mut::<Video>()
@@ -184,7 +184,7 @@ impl Engine {
             .finish()?;
 
         if frames > 1 {
-            eprintln!("output: {} ({frames} frames)", video.display());
+            log::info!("output: {} ({frames} frames)", video.display());
         }
 
         self.lua.gc_collect()?;

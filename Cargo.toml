@@ -8,6 +8,7 @@ description = "A modern, Lua-driven image and video compositing engine"
 multithreading = []
 
 [dependencies]
+log = "0.4"
 notify = "8"
 png = "0.18"
 rayon = "1"
@@ -20,6 +21,7 @@ mlua = { version = "0.12", features = ["lua54", "vendored", "error-send"] }
 parley = { version = "0.12", default-features = false, features = ["std"] }
 parlance = { version = "0.1", default-features = false, features = ["std"] }
 skrifa = { version = "0.44", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 vello_cpu = { version = "0.3", default-features = false, features = ["std", "u8_pipeline"] }
 
 [dev-dependencies]

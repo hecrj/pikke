@@ -39,6 +39,7 @@ fn run() -> Result<()> {
     let mut compression = Compression::default();
     let mut scale_video = 1.0;
     let mut framerate = 60;
+    let mut verbose = false;
 
     {
         let mut args = std::env::args();
@@ -122,10 +123,28 @@ fn run() -> Result<()> {
                 "--fast" => {
                     compression = Compression::Fast;
                 }
+                "--verbose" => {
+                    verbose = true;
+                }
                 _ => {}
             }
         }
     }
+
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::builder()
+                .with_default_directive(
+                    if verbose {
+                        tracing_subscriber::filter::LevelFilter::INFO
+                    } else {
+                        tracing_subscriber::filter::LevelFilter::WARN
+                    }
+                    .into(),
+                )
+                .from_env_lossy(),
+        )
+        .init();
 
     if let Some(threads) = threads {
         let max_threads = thread::available_parallelism()
@@ -168,7 +187,7 @@ fn run() -> Result<()> {
                 // Already parsed
                 let _ = args.next();
             }
-            "--release" | "--fast" => {
+            "--release" | "--fast" | "--verbose" => {
                 // Already parsed
             }
             "--output" => {
@@ -224,7 +243,7 @@ fn run() -> Result<()> {
         })
         .collect();
 
-    eprintln!(
+    log::info!(
         "run: {} ×{scale} {}",
         engine.script().display(),
         arguments
@@ -267,6 +286,7 @@ Options:
   --scale-video <s> Scale the video by a factor (default 1)
   --framerate <n>   The video's framerate (default 60)
   --stdin           Read jobs from stdin, one JSON object per line
+  --verbose         Enables verbose logging
   --help            Print this help",
     );
 

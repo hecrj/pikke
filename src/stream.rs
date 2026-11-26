@@ -51,7 +51,7 @@ impl Stream {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        eprintln!("stream: {command:?}");
+        log::debug!("stream: {command:?}");
 
         let mut child = command.spawn().map_err(|error| {
             io::Error::other(format!("stream: failed to spawn {program}: {error}"))

@@ -70,7 +70,7 @@ impl Video {
                 let framerate = self.framerate;
                 let handle = thread::spawn(move || {
                     worker(output, width, height, scale, framerate, receiver)
-                        .inspect_err(|error| eprintln!("{error}"))
+                        .inspect_err(|error| log::error!("{error}"))
                 });
 
                 sender.send(Some(first)).map_err(io::Error::other)?;
